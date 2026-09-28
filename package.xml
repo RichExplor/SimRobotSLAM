@@ -2,7 +2,7 @@
 <package format="3">
   <name>sim_robot_slam</name>
   <version>0.1.0</version>
-  <description>Gazebo Harmonic simulation for a differential-drive robot with lidar and IMU.</description>
+  <description>Gazebo Harmonic simulation for a mecanum-drive robot with lidar and IMU.</description>
   <maintainer email="maintainer@example.com">sim_robot_slam maintainers</maintainer>
   <license>Apache-2.0</license>
 

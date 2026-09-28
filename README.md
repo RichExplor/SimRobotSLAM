@@ -1,6 +1,6 @@
 # sim_robot_slam
 
-Ubuntu 24.04 / ROS 2 Jazzy / Gazebo Harmonic differential-drive simulation. The
+Ubuntu 24.04 / ROS 2 Jazzy / Gazebo Harmonic four-wheel mecanum simulation. The
 robot has a 16-channel 360-degree GPU LiDAR, an IMU, wheel odometry, and ROS
 bridges for its sensors and drive command.
 
@@ -35,13 +35,18 @@ pass its path with `world:=/path/to/world.sdf`.
 
 | Topic | ROS type | Direction | Description |
 | --- | --- | --- | --- |
-| `/cmd_vel` | `geometry_msgs/msg/Twist` | ROS to Gazebo | Differential-drive velocity command |
+| `/cmd_vel` | `geometry_msgs/msg/Twist` | ROS to Gazebo | Planar mecanum velocity command (forward, lateral, yaw) |
 | `/wheel/odometry` | `nav_msgs/msg/Odometry` | Gazebo to ROS | Wheel odometry; `odom` to `base_footprint` |
 | `/tf` | `tf2_msgs/msg/TFMessage` | Gazebo to ROS | Odometry transform |
 | `/joint_states` | `sensor_msgs/msg/JointState` | Gazebo to ROS | Wheel joint positions and velocities |
 | `/imu/data` | `sensor_msgs/msg/Imu` | Gazebo to ROS | IMU data in `imu_link` |
 | `/lidar/points` | `sensor_msgs/msg/PointCloud2` | Gazebo to ROS | 16-channel point cloud in `lidar_link` |
 | `/clock` | `rosgraph_msgs/msg/Clock` | Gazebo to ROS | Simulation time |
+
+The four drive joints use a lightweight anisotropic-friction approximation for
+the mecanum rollers. Individual roller spin joints are not modeled, so this
+setup is intended for navigation and SLAM simulation rather than detailed
+roller-contact dynamics.
 
 The IMU applies zero-mean Gaussian white noise independently to each axis:
 0.05 m/s² standard deviation for linear acceleration and 0.1°/s (0.001745 rad/s)
@@ -76,15 +81,15 @@ Keep this terminal focused while driving. The keys are:
 | --- | --- |
 | `i` / `,` | Forward / backward |
 | `j` / `l` | Turn left / right |
-| `u` / `o` | Forward while turning left / right |
-| `m` / `.` | Backward while turning left / right |
+| Hold `Shift`, then `J` / `L` | Strafe left / right |
+| Hold `Shift`, then `I` / `<` | Forward / backward |
 | `k` | Stop |
 | `q` / `z` | Increase / decrease both speed limits |
 | `w` / `x` | Increase / decrease linear speed |
 | `e` / `c` | Increase / decrease turn speed |
 
 Press `Ctrl-C` to exit. The node publishes `geometry_msgs/msg/Twist` on
-`/cmd_vel`, matching the Gazebo drive plugin.
+`/cmd_vel`, matching the Gazebo mecanum drive plugin.
 
 ### Publish velocity commands directly
 
@@ -102,6 +107,13 @@ Turn in place:
 ```bash
 ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
   "{linear: {x: 0.0}, angular: {z: 0.5}}" -r 10
+```
+
+Strafe left:
+
+```bash
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {y: 0.2}}" -r 10
 ```
 
 To stop the robot, publish a zero command (or stop the repeated command
