@@ -192,6 +192,72 @@
       <always_on>true</always_on>
       <update_rate>100</update_rate>
       <topic>/imu/data</topic>
+      <imu>
+        <angular_velocity>
+          <x>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.001745329252</stddev>
+              <bias_mean>0.0</bias_mean>
+              <bias_stddev>0.000174532925</bias_stddev>
+              <dynamic_bias_stddev>0.000002</dynamic_bias_stddev>
+              <dynamic_bias_correlation_time>3600</dynamic_bias_correlation_time>
+            </noise>
+          </x>
+          <y>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.001745329252</stddev>
+              <bias_mean>0.0</bias_mean>
+              <bias_stddev>0.000174532925</bias_stddev>
+              <dynamic_bias_stddev>0.000002</dynamic_bias_stddev>
+              <dynamic_bias_correlation_time>3600</dynamic_bias_correlation_time>
+            </noise>
+          </y>
+          <z>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.001745329252</stddev>
+              <bias_mean>0.0</bias_mean>
+              <bias_stddev>0.000174532925</bias_stddev>
+              <dynamic_bias_stddev>0.000002</dynamic_bias_stddev>
+              <dynamic_bias_correlation_time>3600</dynamic_bias_correlation_time>
+            </noise>
+          </z>
+        </angular_velocity>
+        <linear_acceleration>
+          <x>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.05</stddev>
+              <bias_mean>0.0</bias_mean>
+              <bias_stddev>0.005</bias_stddev>
+              <dynamic_bias_stddev>0.0001</dynamic_bias_stddev>
+              <dynamic_bias_correlation_time>3600</dynamic_bias_correlation_time>
+            </noise>
+          </x>
+          <y>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.05</stddev>
+              <bias_mean>0.0</bias_mean>
+              <bias_stddev>0.005</bias_stddev>
+              <dynamic_bias_stddev>0.0001</dynamic_bias_stddev>
+              <dynamic_bias_correlation_time>3600</dynamic_bias_correlation_time>
+            </noise>
+          </y>
+          <z>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.05</stddev>
+              <bias_mean>0.0</bias_mean>
+              <bias_stddev>0.005</bias_stddev>
+              <dynamic_bias_stddev>0.0001</dynamic_bias_stddev>
+              <dynamic_bias_correlation_time>3600</dynamic_bias_correlation_time>
+            </noise>
+          </z>
+        </linear_acceleration>
+      </imu>
     </sensor>
   </gazebo>
 

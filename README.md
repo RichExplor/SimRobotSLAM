@@ -24,9 +24,12 @@ source install/setup.bash
 ros2 launch sim_robot_slam simulation.launch.py
 ```
 
-Gazebo opens the demo world and starts the robot at the origin. The world has
-walls and a few obstacles so the point cloud has visible returns. To use another
-SDF world, pass its path with `world:=/path/to/world.sdf`.
+Gazebo opens the approximately 50 × 50 m demo world and starts the robot at the
+origin. Its open-top indoor layout has a connected cross-shaped main corridor
+and eight rooms: a meeting room, library, workshop, server lab, kitchen, lounge,
+clinic, and warehouse. The rooms contain furniture, shelving, equipment, crates,
+and other obstacles for LiDAR mapping and navigation. To use another SDF world,
+pass its path with `world:=/path/to/world.sdf`.
 
 ## ROS topics
 
@@ -39,6 +42,13 @@ SDF world, pass its path with `world:=/path/to/world.sdf`.
 | `/imu/data` | `sensor_msgs/msg/Imu` | Gazebo to ROS | IMU data in `imu_link` |
 | `/lidar/points` | `sensor_msgs/msg/PointCloud2` | Gazebo to ROS | 16-channel point cloud in `lidar_link` |
 | `/clock` | `rosgraph_msgs/msg/Clock` | Gazebo to ROS | Simulation time |
+
+The IMU applies zero-mean Gaussian white noise independently to each axis:
+0.05 m/s² standard deviation for linear acceleration and 0.1°/s (0.001745 rad/s)
+for angular velocity. It also has small zero-mean turn-on bias (standard deviation
+0.005 m/s² for acceleration and 0.01°/s for angular velocity) and slow correlated
+bias drift with a 3600 s correlation time. These bias values are deliberately
+small compared with the BMI088 datasheet's zero-offset limits.
 
 The LiDAR is configured for 1024 horizontal samples per revolution, 16 vertical
 channels from -15 to +15 degrees, 10 Hz, and a 0.2 to 60 m range. These are
