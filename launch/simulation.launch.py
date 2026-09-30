@@ -14,9 +14,7 @@ def generate_launch_description():
     robot_description_file = PathJoinSubstitution(
         [package_share, "urdf", "sim_robot.urdf.xacro"]
     )
-    bridge_config_file = PathJoinSubstitution(
-        [package_share, "config", "bridge.yaml"]
-    )
+    bridge_config_file = LaunchConfiguration("bridge_config")
     gazebo_launch_file = PathJoinSubstitution(
         [FindPackageShare("ros_gz_sim"), "launch", "gz_sim.launch.py"]
     )
@@ -80,6 +78,13 @@ def generate_launch_description():
                 "use_sim_time",
                 default_value="true",
                 description="Use the Gazebo simulation clock in ROS nodes.",
+            ),
+            DeclareLaunchArgument(
+                "bridge_config",
+                default_value=PathJoinSubstitution(
+                    [package_share, "config", "bridge.yaml"]
+                ),
+                description="ROS-Gazebo bridge configuration file.",
             ),
             gazebo,
             robot_state_publisher,
