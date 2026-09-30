@@ -43,9 +43,9 @@ def generate_launch_description():
         executable="static_transform_publisher",
         name="imu_to_base_footprint",
         arguments=[
-            "--x", "0.0",
+            "--x", "0.1955",
             "--y", "0.0",
-            "--z", "-0.19",
+            "--z", "-0.368",
             "--roll", "0.0",
             "--pitch", "0.0",
             "--yaw", "0.0",

@@ -31,6 +31,39 @@ clinic, and warehouse. The rooms contain furniture, shelving, equipment, crates,
 and other obstacles for LiDAR mapping and navigation. To use another SDF world,
 pass its path with `world:=/path/to/world.sdf`.
 
+Each simulation launch creates a unique Gazebo transport partition and shares
+it with the server, GUI, robot spawner, and ROS bridge. This keeps an orphaned
+server from a previous launch from supplying an old model's sensor data or
+handling the new launch's spawn request. For direct `gz` inspection, use a known
+partition: launch with `gz_partition:=sim_robot_debug`, then run Gazebo CLI
+commands with `GZ_PARTITION=sim_robot_debug`. ROS topic names are unchanged.
+
+## Measured robot geometry
+
+All coordinates below use `base_footprint` at the ground projection of the
+chassis center: +X forward, +Y left, +Z upward. The supplied sensor locations
+are treated as the sensor frame origins; all sensor rotations are identity.
+The LiDAR housing is drawn above its mounting frame, so its bottom is at
+Z = 0.539 m. The simulated scan uses that same frame origin; an optical-origin
+offset relative to the housing was not supplied.
+
+| Parameter | Value (m) |
+| --- | --- |
+| Front/rear wheel center separation | 0.580 |
+| Left/right wheel center separation | 0.454 |
+| Wheel radius / width | 0.125 / 0.050 |
+| Wheel centers | X = ±0.290, Y = ±0.227, Z = 0.125 |
+| LiDAR origin | (0.343, 0, 0.539) |
+| IMU origin | (-0.1955, 0, 0.368) |
+| LiDAR origin in IMU coordinates | (0.5385, 0, 0.171) |
+| Base origin in IMU coordinates | (0.1955, 0, -0.368) |
+
+The body shell dimensions and masses were not supplied. The model retains the
+original shell proportions, scaled to 0.60 × 0.40 × 0.15 m, with its center at
+Z = 0.2125 m. Its mass remains 8 kg, each wheel remains 0.6 kg, and their inertias
+are updated for the new shapes. The wheel envelope is 0.830 × 0.504 m;
+the Nav2 footprint bounds are X = ±0.415 m and Y = ±0.252 m, with 0.02 m padding.
+
 ## ROS topics
 
 | Topic | ROS type | Direction | Description |
@@ -187,10 +220,20 @@ Navigation forward speed is limited to 0.30 m/s in both MPPI and the velocity
 smoother. Backup recovery is limited to 0.25 m/s by the smoother; docking uses
 0.15 m/s. These are linear speed limits, separate from angular rates in rad/s;
 keyboard commands sent directly to `/cmd_vel` use the keyboard node's limits.
-Global and local inflation radii are 0.40 m with `cost_scaling_factor: 10.0` for
+Global and local inflation radii are 0.55 m with `cost_scaling_factor: 10.0` for
 a narrower, faster-decaying obstacle cost field. The radius is measured from
 obstacles, not added outside the robot footprint. The padded footprint's
-circumscribed radius is about 0.373 m; reassess inflation if its dimensions change.
+circumscribed radius is about 0.513 m; reassess inflation if its dimensions change.
+
+The matching SuperSLAM `SimMapping.yaml` and `SimRelocation.yaml` use
+`lio.extrinsic.lidar_imu` translation `[0.5385, 0.0, 0.171]` with identity
+rotation, `lio.extrinsic.odom_robo` `[-0.1955, 0.0, 0.368, 0.0, 0.0, 0.0]`,
+and `lio.loop.sc_lidar_height: 0.539`. Rebuild the SuperSLAM prior map and
+Scan Context database with these settings before global relocalization;
+the saved map profile includes sensor extrinsics and height, so the old
+database cannot be reused unchanged. Keep the existing 2D map only if its
+origin and axes still agree with the rebuilt prior map; calibrate `map -> world`
+or regenerate the OccupancyGrid otherwise.
 
 To monitor startup, check `/lio/localization_state` for `valid: true` and inspect
 the transform with:
@@ -229,12 +272,12 @@ These constraints affect Nav2; keyboard control still supports the physical
 Mecanum base's lateral motion. When transitioning from motion to rotation, the
 velocity smoother decelerates existing forward speed before it reaches zero.
 
-Collision Monitor excludes point cloud returns within 0.30 m of the LiDAR using
-`collision_monitor.pointcloud.min_range`. The downward beams otherwise hit the
-chassis inside the robot footprint and cause `FootprintApproach` to stop the
-robot. This filter only affects Collision Monitor; `/lidar/points` remains
-unchanged for SuperSLAM and the costmaps. Revisit this range if the robot or
-LiDAR mounting geometry changes.
+Collision Monitor's `pointcloud.min_range` is 0.20 m, matching the LiDAR's
+minimum measurement range. With the measured mounting position and the current
+simplified shell, the downward beams pass above the robot's own collision
+geometry, so the old 0.30 m self-return crop is unnecessary. This filter only
+affects Collision Monitor; `/lidar/points` remains unchanged for SuperSLAM and
+the costmaps. Revisit self-return filtering if the shell or LiDAR mounting changes.
 
 The GPU LiDAR uses Gazebo's Ogre2 sensor renderer. A working graphics driver and
 OpenGL support are needed for point cloud generation.

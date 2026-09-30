@@ -182,15 +182,15 @@ local_costmap:
       width: 5
       height: 5
       resolution: 0.05
-      # Chassis and wheel collision envelope in base_footprint.
-      footprint: "[[0.27, 0.215], [0.27, -0.215], [-0.27, -0.215], [-0.27, 0.215]]"
+      # Wheel envelope: x = 0.290 + 0.125, y = 0.227 + 0.050 / 2.
+      footprint: "[[0.415, 0.252], [0.415, -0.252], [-0.415, -0.252], [-0.415, 0.252]]"
       footprint_padding: 0.02
       plugins: ["voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # Padded footprint circumscribed radius is about 0.373 m.
+        # Padded footprint circumscribed radius is about 0.513 m.
         cost_scaling_factor: 10.0
-        inflation_radius: 0.40
+        inflation_radius: 0.55
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
@@ -222,7 +222,7 @@ global_costmap:
       publish_frequency: 1.0
       global_frame: map
       robot_base_frame: base_footprint
-      footprint: "[[0.27, 0.215], [0.27, -0.215], [-0.27, -0.215], [-0.27, 0.215]]"
+      footprint: "[[0.415, 0.252], [0.415, -0.252], [-0.415, -0.252], [-0.415, 0.252]]"
       footprint_padding: 0.02
       resolution: 0.05
       track_unknown_space: true
@@ -233,7 +233,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 10.0
-        inflation_radius: 0.40
+        inflation_radius: 0.55
       always_send_full_costmap: True
 
 map_server:
@@ -378,9 +378,9 @@ collision_monitor:
     pointcloud:
       type: "pointcloud"
       topic: "/lidar/points"
-      # Downward LiDAR beams hit the chassis at about 0.27 m from the sensor.
-      # Exclude these self returns so they do not trigger FootprintApproach.
-      min_range: 0.30
+      # Match the LiDAR's 0.20 m minimum range. The new mounting geometry
+      # puts the shell below the downward beams, so the old self-return crop is unnecessary.
+      min_range: 0.20
       min_height: 0.05
       max_height: 1.5
       enabled: True

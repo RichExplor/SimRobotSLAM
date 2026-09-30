@@ -1,5 +1,12 @@
+import os
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    SetEnvironmentVariable,
+    TimerAction,
+)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -15,6 +22,7 @@ def generate_launch_description():
         [package_share, "urdf", "sim_robot.urdf.xacro"]
     )
     bridge_config_file = LaunchConfiguration("bridge_config")
+    gz_partition = LaunchConfiguration("gz_partition")
     gazebo_launch_file = PathJoinSubstitution(
         [FindPackageShare("ros_gz_sim"), "launch", "gz_sim.launch.py"]
     )
@@ -67,6 +75,12 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "gz_partition",
+                default_value=f"sim_robot_slam_{os.getpid()}",
+                description="Gazebo transport partition shared by the server, bridge, and spawner.",
+            ),
+            SetEnvironmentVariable("GZ_PARTITION", gz_partition),
             DeclareLaunchArgument(
                 "world",
                 default_value=PathJoinSubstitution(
