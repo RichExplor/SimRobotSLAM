@@ -70,7 +70,7 @@ controller_server:
       angular_dist_threshold: 0.10
       angular_disengage_threshold: 0.05
       forward_sampling_distance: 0.5
-      rotate_to_heading_angular_vel: 0.5
+      rotate_to_heading_angular_vel: 0.6
       max_angular_accel: 1.8
       simulate_ahead_time: 1.0
       rotate_to_goal_heading: true
@@ -90,10 +90,10 @@ controller_server:
       vx_std: 0.2
       vy_std: 0.0
       wz_std: 0.4
-      vx_max: 0.30
+      vx_max: 0.80
       vx_min: 0.0
       vy_max: 0.0
-      wz_max: 1.2
+      wz_max: 0.6
       iteration_count: 1
       prune_distance: 1.7
       transform_tolerance: 0.1
@@ -195,24 +195,46 @@ local_costmap:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
         publish_voxel_map: False
-        origin_z: 0.0
-        z_resolution: 0.1
+        # World ground is slightly tilted. Height filtering runs in SuperSLAM's
+        # base frame; these bounds only define the voxel volume / ray clipping.
+        origin_z: -0.5
+        z_resolution: 0.15
         z_voxels: 16
-        max_obstacle_height: 1.5
+        min_obstacle_height: -0.5
+        max_obstacle_height: 1.9
         mark_threshold: 0
-        observation_sources: pointcloud
-        pointcloud:
-          topic: /lidar/points
-          sensor_frame: lidar_link
-          min_obstacle_height: 0.05
-          max_obstacle_height: 1.5
-          clearing: True
+        observation_sources: nav_obstacles nav_clearing
+        nav_obstacles:
+          topic: /lio/cloud_nav
+          # Use the message's base frame as the marking range origin. Leaving
+          # sensor_frame empty avoids an extra TF MessageFilter target.
+          sensor_frame: ""
+          # Ground was removed relative to base_footprint before publication.
+          min_obstacle_height: -0.5
+          max_obstacle_height: 1.9
+          clearing: False
           marking: True
           data_type: "PointCloud2"
-          raytrace_max_range: 6.0
-          raytrace_min_range: 0.1
+          observation_persistence: 0.0
+          # Allow processing jitter while retaining stale-data stop protection.
+          expected_update_rate: 1.0
           obstacle_max_range: 5.0
           obstacle_min_range: 0.15
+        nav_clearing:
+          topic: /lio/cloud_nav_clearing
+          # The message is in lidar_link, so its default origin is the LiDAR.
+          sensor_frame: ""
+          # Only current-frame returns can define rays from the sensor origin.
+          # Include ground endpoints here; this source cannot mark obstacles.
+          min_obstacle_height: -0.5
+          max_obstacle_height: 1.9
+          clearing: True
+          marking: False
+          data_type: "PointCloud2"
+          observation_persistence: 0.0
+          expected_update_rate: 1.0
+          raytrace_max_range: 6.0
+          raytrace_min_range: 0.1
       always_send_full_costmap: True
 
 global_costmap:
@@ -293,7 +315,7 @@ behavior_server:
     enable_stamped_cmd_vel: false
     transform_tolerance: 0.1
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
+    max_rotational_vel: 0.6
     min_rotational_vel: 0.4
     rotational_acc_lim: 3.2
 
@@ -338,8 +360,8 @@ velocity_smoother:
     scale_velocities: False
     feedback: "OPEN_LOOP"
     # Clamp navigation lateral velocity to zero, including recovery commands.
-    max_velocity: [0.30, 0.0, 1.2]
-    min_velocity: [-0.25, 0.0, -1.2]
+    max_velocity: [0.80, 0.0, 0.6]
+    min_velocity: [-0.25, 0.0, -0.6]
     max_accel: [0.8, 0.8, 1.8]
     max_decel: [-0.8, -0.8, -1.8]
     odom_topic: "/wheel/odometry"

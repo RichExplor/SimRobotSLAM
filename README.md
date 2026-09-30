@@ -211,13 +211,58 @@ is ready, use **Nav2 Goal** to send a goal. Set `autostart:=false` to leave Nav2
 inactive and activate it manually from RViz. To use another OccupancyGrid, pass
 its YAML file with `map:=/path/to/map.yaml`.
 
+### Navigation point clouds
+
+SuperSLAM's simulation configurations enable a separate navigation output:
+
+| Topic | Frame | Local costmap use |
+| --- | --- | --- |
+| `/lio/cloud_nav` | `base_footprint` | Mark obstacles after ground filtering |
+| `/lio/cloud_nav_clearing` | `lidar_link` | Clear using current-frame rays, including ground returns |
+
+Both are `sensor_msgs/PointCloud2` with x/y/z/intensity and Best Effort QoS.
+SuperSLAM filters obstacles at 0.05–1.5 m above the robot's ground projection,
+within 6 m of the LiDAR. This avoids treating a tilted world's ground Z as an
+obstacle height. Original `/lidar/points` continues to feed SLAM and Collision
+Monitor; Collision Monitor already filters heights in the robot frame.
+
+In `super_slam/config/SimMapping.yaml` and `SimRelocation.yaml`,
+`lio.navigation.accumulation_frames: 3` and `max_age: 0.3` retain a short history.
+Frames are aligned through their world poses to the current base before a
+0.05 m voxel filter. Use `accumulation_frames: 1` for dynamic scenes to reduce
+short-lived trails. Clearing uses single-frame returns and the actual LiDAR
+origin; accumulated points are not used to generate clearing rays. History is
+discarded after localization loss/search, a clock reset, a gap over max_age,
+or an adjacent-frame pose jump over 1 m / 0.5 rad. Output runs at processed scan
+rate independently of visualization output settings.
+
+During valid tracking, SuperSLAM publishes `world -> imu` TF from its IMU
+forward integration between LiDAR updates. This supports Nav2's intermediate
+pose queries. Local point-cloud sources use their message frames as origins
+without a redundant sensor-frame TF target: base center for marking, LiDAR
+origin for clearing. Their 1.0 s freshness limit allows processing jitter and
+still stops control when observations become stale.
+
+The local voxel volume covers world Z [-0.5, 1.9] m; these are volume bounds,
+not the ground-filter threshold. Adjust the volume for terrain outside this
+range. Objects lower than `lio.navigation.min_height` are also filtered; tune
+that value for the robot's low-obstacle detection needs. Changes require a
+SuperSLAM / Nav2 restart. Restarting Nav2 creates a fresh local costmap. To clear
+an already running local map explicitly:
+
+```bash
+ros2 service call /local_costmap/clear_entirely_local_costmap nav2_msgs/srv/ClearEntireCostmap '{}'
+```
+
 The default navigation view uses `config/nav2.rviz`. It shows only the map,
 robot model, global/local costmaps, and planned path, with the Navigation 2 panel
 and Nav2 Goal tool. The robot model is enabled by default and reads the latched
 `/robot_description` topic. Sensor/debug displays and AMCL tools are omitted.
 
-Navigation forward speed is limited to 0.30 m/s in both MPPI and the velocity
-smoother. Backup recovery is limited to 0.25 m/s by the smoother; docking uses
+Navigation forward speed is limited to 0.80 m/s in both MPPI and the velocity
+smoother. Heading alignment uses 0.60 rad/s; MPPI, spin recovery, and the smoother
+limit navigation yaw rate to 0.60 rad/s in either direction.
+Backup recovery is limited to 0.25 m/s by the smoother; docking uses
 0.15 m/s. These are linear speed limits, separate from angular rates in rad/s;
 keyboard commands sent directly to `/cmd_vel` use the keyboard node's limits.
 Global and local inflation radii are 0.55 m with `cost_scaling_factor: 10.0` for
@@ -276,8 +321,9 @@ Collision Monitor's `pointcloud.min_range` is 0.20 m, matching the LiDAR's
 minimum measurement range. With the measured mounting position and the current
 simplified shell, the downward beams pass above the robot's own collision
 geometry, so the old 0.30 m self-return crop is unnecessary. This filter only
-affects Collision Monitor; `/lidar/points` remains unchanged for SuperSLAM and
-the costmaps. Revisit self-return filtering if the shell or LiDAR mounting changes.
+affects Collision Monitor; `/lidar/points` remains unchanged for SuperSLAM.
+The local costmap uses the navigation-specific clouds described above.
+Revisit self-return filtering if the shell or LiDAR mounting changes.
 
 The GPU LiDAR uses Gazebo's Ogre2 sensor renderer. A working graphics driver and
 OpenGL support are needed for point cloud generation.
