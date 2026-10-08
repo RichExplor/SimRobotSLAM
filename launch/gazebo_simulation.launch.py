@@ -7,6 +7,7 @@ from launch.actions import (
     SetEnvironmentVariable,
     TimerAction,
 )
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -18,6 +19,10 @@ def generate_launch_description():
     package_share = FindPackageShare("sim_robot_slam")
     world_file = LaunchConfiguration("world")
     use_sim_time = LaunchConfiguration("use_sim_time")
+    spawn_x = LaunchConfiguration("spawn_x")
+    spawn_y = LaunchConfiguration("spawn_y")
+    spawn_yaw = LaunchConfiguration("spawn_yaw")
+    spawn_robot_enabled = LaunchConfiguration("spawn_robot")
     robot_description_file = PathJoinSubstitution(
         [package_share, "urdf", "sim_robot.urdf.xacro"]
     )
@@ -64,12 +69,15 @@ def generate_launch_description():
             "-topic",
             "robot_description",
             "-x",
-            "0",
+            spawn_x,
             "-y",
-            "0",
+            spawn_y,
             "-z",
             "0",
+            "-Y",
+            spawn_yaw,
         ],
+        condition=IfCondition(spawn_robot_enabled),
         output="screen",
     )
 
@@ -84,7 +92,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "world",
                 default_value=PathJoinSubstitution(
-                    [package_share, "worlds", "demo.sdf"]
+                    [package_share, "worlds", "indoor_world.sdf"]
                 ),
                 description="SDF world file to start in Gazebo Sim.",
             ),
@@ -92,6 +100,29 @@ def generate_launch_description():
                 "use_sim_time",
                 default_value="true",
                 description="Use the Gazebo simulation clock in ROS nodes.",
+            ),
+            DeclareLaunchArgument(
+                "spawn_x",
+                default_value="0.0",
+                description="Robot spawn X position in the Gazebo world.",
+            ),
+            DeclareLaunchArgument(
+                "spawn_y",
+                default_value="0.0",
+                description="Robot spawn Y position in the Gazebo world.",
+            ),
+            DeclareLaunchArgument(
+                "spawn_yaw",
+                default_value="0.0",
+                description="Robot spawn yaw in radians.",
+            ),
+            DeclareLaunchArgument(
+                "spawn_robot",
+                default_value="true",
+                description=(
+                    "Spawn from robot_description; set false when the world already "
+                    "contains sim_robot_slam."
+                ),
             ),
             DeclareLaunchArgument(
                 "bridge_config",
