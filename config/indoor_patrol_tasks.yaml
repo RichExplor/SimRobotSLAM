@@ -1,0 +1,17 @@
+# 节点编号对应 indoor_route.geojson 中的 properties.id。
+# angle_deg 正数表示逆时针，负数表示顺时针；任务按列表顺序执行。
+failure_policy: stop
+points:
+  1:
+    - type: spin
+      angle_deg: 360.0
+      timeout_sec: 30.0
+    - type: wait
+      duration_sec: 2.0
+  2:
+    - type: wait
+      duration_sec: 5.0
+  5:
+    - type: spin
+      angle_deg: -360.0
+      timeout_sec: 30.0

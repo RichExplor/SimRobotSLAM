@@ -1,0 +1,17 @@
+# 节点编号对应 outdoor_route.geojson 中的 properties.id。
+# 没有配置任务的节点在确认停车后继续前往下一节点。
+failure_policy: stop
+points:
+  1:
+    - type: spin
+      angle_deg: 360.0
+      timeout_sec: 30.0
+    - type: wait
+      duration_sec: 2.0
+  2:
+    - type: wait
+      duration_sec: 5.0
+  5:
+    - type: spin
+      angle_deg: -360.0
+      timeout_sec: 30.0

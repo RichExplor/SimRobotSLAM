@@ -5,6 +5,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+from nav2_common.launch import RewrittenYaml
 
 
 def generate_launch_description():
@@ -18,9 +19,16 @@ def generate_launch_description():
 
     map_yaml = LaunchConfiguration("map")
     params_file = LaunchConfiguration("params_file")
+    route_graph = LaunchConfiguration("route_graph")
     use_sim_time = LaunchConfiguration("use_sim_time")
     autostart = LaunchConfiguration("autostart")
     rviz = LaunchConfiguration("rviz")
+
+    route_params_file = RewrittenYaml(
+        source_file=params_file,
+        param_rewrites={"graph_filepath": route_graph},
+        convert_types=True,
+    )
 
     map_server = Node(
         package="nav2_map_server",
@@ -100,7 +108,7 @@ def generate_launch_description():
                     "use_namespace": "False",
                     "map": map_yaml,
                     "use_sim_time": use_sim_time,
-                    "params_file": params_file,
+                    "params_file": route_params_file,
                     # The localization gate starts this lifecycle manager once
                     # map, SuperSLAM validity, and the complete TF chain are ready.
                     "autostart": "false",
@@ -145,6 +153,14 @@ def generate_launch_description():
                     [package_share, "config", "nav2_params.yaml"]
                 ),
                 description="Nav2 parameters for this Mecanum simulation.",
+            ),
+            DeclareLaunchArgument(
+                "route_graph",
+                default_value="",
+                description=(
+                    "Optional GeoJSON graph loaded by Nav2 Route Server. "
+                    "Leave empty to disable graph-based routing."
+                ),
             ),
             DeclareLaunchArgument(
                 "use_sim_time",

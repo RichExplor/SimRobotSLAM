@@ -4,6 +4,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -20,6 +21,11 @@ def generate_launch_description():
 
     use_sim_time = LaunchConfiguration("use_sim_time")
     map_yaml = LaunchConfiguration("map")
+    route_graph = LaunchConfiguration("route_graph")
+    route_start_id = LaunchConfiguration("route_start_id")
+    route_goal_id = LaunchConfiguration("route_goal_id")
+    route_via_ids = LaunchConfiguration("route_via_ids")
+    task_config = LaunchConfiguration("task_config")
     map_dir = LaunchConfiguration("map_dir")
     autostart = LaunchConfiguration("autostart")
     rviz = LaunchConfiguration("rviz")
@@ -72,10 +78,27 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(nav2_launch),
         launch_arguments={
             "map": map_yaml,
+            "route_graph": route_graph,
             "use_sim_time": use_sim_time,
             "autostart": autostart,
             "rviz": rviz,
         }.items(),
+    )
+
+    route_patrol = Node(
+        package="sim_robot_slam",
+        executable="route_patrol",
+        name="route_patrol",
+        output="screen",
+        parameters=[
+            {
+                "start_id": ParameterValue(route_start_id, value_type=int),
+                "goal_id": ParameterValue(route_goal_id, value_type=int),
+                "via_ids": ParameterValue(route_via_ids, value_type=str),
+                "task_config": ParameterValue(task_config, value_type=str),
+                "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
+            }
+        ],
     )
 
     return LaunchDescription(
@@ -91,6 +114,38 @@ def generate_launch_description():
                 "map_dir",
                 default_value="map_sim/indoor",
                 description="Indoor SuperSLAM prior-map directory under the workspace root.",
+            ),
+            DeclareLaunchArgument(
+                "route_graph",
+                default_value=PathJoinSubstitution(
+                    [package_share, "routes", "indoor_route.geojson"]
+                ),
+                description="GeoJSON route graph loaded by Nav2 Route Server.",
+            ),
+            DeclareLaunchArgument(
+                "route_via_ids",
+                default_value="",
+                description="Ordered intermediate node IDs, separated by commas.",
+            ),
+            DeclareLaunchArgument(
+                "task_config",
+                default_value=PathJoinSubstitution(
+                    [package_share, "config", "indoor_patrol_tasks.yaml"]
+                ),
+                description="Inspection tasks keyed by route graph node ID; empty disables tasks.",
+            ),
+            DeclareLaunchArgument(
+                "route_start_id",
+                default_value="1",
+                description=(
+                    "Start node ID in the indoor route graph. Node 1 is near the "
+                    "default Gazebo spawn pose."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "route_goal_id",
+                default_value="10",
+                description="Goal node ID in the indoor route graph.",
             ),
             DeclareLaunchArgument(
                 "use_sim_time",
@@ -111,5 +166,6 @@ def generate_launch_description():
             relocation,
             relocation_rviz,
             navigation,
+            route_patrol,
         ]
     )

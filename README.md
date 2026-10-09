@@ -1,19 +1,20 @@
 # SimRobotSLAM 仿真工程
 
-本工程基于 Ubuntu 24.04、ROS 2 Jazzy 和 Gazebo Harmonic，提供四轮麦克纳姆轮机器人仿真。机器人包含 16 线 360° GPU 激光雷达、惯性测量单元（IMU）、轮式里程计，以及传感器和运动指令的 ROS 桥接。
+基于 Ubuntu 24.04、ROS 2 Jazzy 和 Gazebo Harmonic，提供室内、室外两种场景及四轮麦克纳姆机器人仿真。使用 SuperSLAM 建图与全局重定位，使用 Nav2 导航，并支持沿固定路线执行巡检任务。
 
 ## 目录
 
-- [环境与构建](#环境与构建)
-- [快速启动](#快速启动)
-- [分终端启动](#分终端启动)
-- [场景与地图](#场景与地图)
-- [机器人模型与传感器](#机器人模型与传感器)
-- [ROS 话题与手动控制](#ros-话题与手动控制)
-- [Nav2 与 SuperSLAM 配置](#nav2-与-superslam-配置)
-- [故障排查提示](#故障排查提示)
+- [1. 环境准备](#1-环境准备)
+- [2. 场景与地图](#2-场景与地图)
+- [3. 建图与手动控制](#3-建图与手动控制)
+- [4. 定位与导航](#4-定位与导航)
+- [5. 固定路线巡检](#5-固定路线巡检)
+- [6. 巡检点任务](#6-巡检点任务)
+- [7. 分开启动各模块](#7-分开启动各模块)
+- [8. 模型与关键配置](#8-模型与关键配置)
+- [9. 常见问题](#9-常见问题)
 
-## 环境与构建
+## 1. 环境准备
 
 ### 安装依赖
 
@@ -23,52 +24,21 @@ sudo apt install ros-jazzy-ros-gz ros-jazzy-xacro ros-jazzy-robot-state-publishe
   ros-jazzy-teleop-twist-keyboard ros-jazzy-navigation2 ros-jazzy-nav2-bringup
 ```
 
-### 构建工作区
+工作区需包含 `sim_robot_slam` 和 `super_slam` 软件包，SuperSLAM 的编译依赖按其工程说明安装。
+
+### 编译
 
 ```bash
 cd /home/guofeng/work/code/SuperSLAM
 source /opt/ros/jazzy/setup.bash
 colcon build --packages-up-to sim_robot_slam super_slam --symlink-install
-source install/setup.bash
 ```
 
-修改 launch、地图或配置后，重新构建相关软件包并重新加载工作区环境。每个新终端都需要 source ROS 和工作区的 setup 文件。
+仅修改本工程时，可使用 `colcon build --packages-select sim_robot_slam`。修改源码、启动文件或包内地图、配置后，重新编译并重启对应模块。
 
-## 快速启动
+### 每个终端的公共准备
 
-### 室内建图
-
-```bash
-ros2 launch sim_robot_slam indoor_mapping.launch.py
-```
-
-该 launch 会启动约 50 × 50 m 的室内场景，在原点生成机器人并运行 SuperSLAM 建图。场景为顶部开放布局，包含相连的十字形主通道和八个房间，房间内设有家具、货架和设备等障碍物。建图结果保存在工作区根目录下的 `map_sim/indoor`。
-
-### 室外建图
-
-```bash
-ros2 launch sim_robot_slam outdoor_mapping.launch.py
-```
-
-该 launch 会启动约 40 × 25 m（约 1000 m²）的室外石油化工场景并运行 SuperSLAM 建图。室外场景包含封闭的外围巡检道路，起点和终点可沿道路闭环。建图结果保存在 `map_sim/outdoor`。
-
-### 室内导航
-
-```bash
-ros2 launch sim_robot_slam indoor_navigation.launch.py rviz:=true
-```
-
-### 室外导航
-
-```bash
-ros2 launch sim_robot_slam outdoor_navigation.launch.py rviz:=true
-```
-
-导航 launch 会启动仿真、SuperSLAM 全局重定位、Nav2 和两个 RViz 窗口：一个用于导航操作，一个用于查看 SuperSLAM 重定位。SuperSLAM 自动执行全局重定位，无需设置初始位姿。Nav2 等待地图、有效的 `/lio/localization_state` 和完整的 `map -> base_footprint` TF 链就绪后自动激活。Navigation 2 面板就绪后，使用 RViz 工具栏中的 Nav2 Goal 发送目标点。传入 `autostart:=false` 可延迟激活 Nav2。
-
-## 分终端启动
-
-以下流程适用于需要分别启停仿真、SuperSLAM 和 Nav2 的情况。每个终端都先执行：
+下文命令均从工作区根目录执行。每个新终端先运行：
 
 ```bash
 cd /home/guofeng/work/code/SuperSLAM
@@ -76,306 +46,400 @@ source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ```
 
-地图目录参数 `map_dir` 相对于工作区根目录。启动前确认对应先验地图已经保存到 `map_sim/indoor` 或 `map_sim/outdoor`。
+`map_sim/...` 是相对于当前目录的路径，也可以通过 `map_dir` 传入绝对路径。
 
-### 独立运行建图
+## 2. 场景与地图
 
-建图时先在终端 1 启动仿真和传感器桥接。室内场景会由 launch 生成机器人，使用普通建图桥接配置：
-
-```bash
-ros2 launch sim_robot_slam gazebo_simulation.launch.py \
-  world:=/home/guofeng/work/code/SuperSLAM/src/SimRobotSLAM/worlds/indoor_world.sdf \
-  bridge_config:=/home/guofeng/work/code/SuperSLAM/src/SimRobotSLAM/config/bridge.yaml \
-  spawn_robot:=true spawn_x:=0.0 spawn_y:=0.0 spawn_yaw:=0.0
-```
-
-室外 SDF 已经包含机器人模型，设置 `spawn_robot:=false`：
-
-```bash
-ros2 launch sim_robot_slam gazebo_simulation.launch.py \
-  world:=/home/guofeng/work/code/SuperSLAM/src/SimRobotSLAM/worlds/outdoor_world.sdf \
-  bridge_config:=/home/guofeng/work/code/SuperSLAM/src/SimRobotSLAM/config/bridge.yaml \
-  spawn_robot:=false
-```
-
-终端 2 启动 SuperSLAM 建图。该 launch 会同时启动建图节点和建图 RViz。
-
-室内：
-
-```bash
-ros2 launch super_slam SimMapping.py use_sim_time:=true rviz:=true map_dir:=map_sim/indoor
-```
-
-室外：
-
-```bash
-ros2 launch super_slam SimMapping.py use_sim_time:=true rviz:=true map_dir:=map_sim/outdoor
-```
-
-完成采集后，在建图终端按 `Ctrl-C` 结束 launch，让 SuperSLAM 保存地图和回环数据库。
-
-### 独立运行重定位与导航
-
-终端 1 启动仿真时，导航模式需要使用 `bridge_nav2.yaml`。该配置关闭 Gazebo 的 `odom -> base_footprint` TF，避免它与 SuperSLAM 的定位 TF 冲突。
-
-室内：
-
-```bash
-ros2 launch sim_robot_slam gazebo_simulation.launch.py \
-  world:=/home/guofeng/work/code/SuperSLAM/src/SimRobotSLAM/worlds/indoor_world.sdf \
-  bridge_config:=/home/guofeng/work/code/SuperSLAM/src/SimRobotSLAM/config/bridge_nav2.yaml \
-  spawn_robot:=true spawn_x:=0.0 spawn_y:=0.0 spawn_yaw:=0.0
-```
-
-室外：
-
-```bash
-ros2 launch sim_robot_slam gazebo_simulation.launch.py \
-  world:=/home/guofeng/work/code/SuperSLAM/src/SimRobotSLAM/worlds/outdoor_world.sdf \
-  bridge_config:=/home/guofeng/work/code/SuperSLAM/src/SimRobotSLAM/config/bridge_nav2.yaml \
-  spawn_robot:=false
-```
-
-终端 2 启动重定位。该 launch 会同时启动 SuperSLAM 重定位节点和 RViz。
-
-室内：
-
-```bash
-ros2 launch super_slam SimRelocation.py use_sim_time:=true rviz:=true map_dir:=map_sim/indoor
-```
-
-室外：
-
-```bash
-ros2 launch super_slam SimRelocation.py use_sim_time:=true rviz:=true map_dir:=map_sim/outdoor
-```
-
-终端 3 启动 Nav2。室内：
-
-```bash
-ros2 launch sim_robot_slam nav2.launch.py \
-  map:=/home/guofeng/work/code/SuperSLAM/src/SimRobotSLAM/maps/indoor.yaml \
-  use_sim_time:=true autostart:=true rviz:=true
-```
-
-室外：
-
-```bash
-ros2 launch sim_robot_slam nav2.launch.py \
-  map:=/home/guofeng/work/code/SuperSLAM/src/SimRobotSLAM/maps/outdoor.yaml \
-  use_sim_time:=true autostart:=true rviz:=true
-```
-
-Nav2 launch 会启动地图服务器、固定 TF、生命周期管理器、定位就绪门控和 Nav2 RViz。定位门控会在地图、SuperSLAM 定位状态和 TF 链就绪后激活 Nav2。Nav2 RViz 与 SuperSLAM 重定位 RViz 是两个独立窗口。仿真和重定位已运行时，只需启动终端 3 的 Nav2 命令。
-
-建图与重定位应按当前任务选择其一运行，避免同时启动两个 SuperSLAM 节点。键盘遥控也不要与 Nav2 同时运行，因为二者都会向 `/cmd_vel` 发布速度指令。
-
-## 场景与地图
-
-### 室内场景
-
-室内世界约为 50 × 50 m，包含可连通的十字形主通道和八个房间。场景采用顶部开放布局，放置了家具、货架、设备、箱体等物体，供激光雷达建图和导航使用。机器人默认在原点生成。
-
-### 室外石油化工场景
-
-室外世界文件为 `worlds/outdoor_world.sdf`，尺寸约 40 × 25 m，面积约 1000 m²。场景包含外围巡检道路、储罐、围堰、精馏塔、反应器、高架管廊、公用设施、火炬、装卸区、建筑、消防设备和车辆出入口。室外 SDF 内置机器人模型，初始位姿为 Gazebo 坐标 `(0, -9, 0)`。采集地图和执行重定位时保持该起始位姿，以便使用一致的坐标系。
-
-### 地图文件与坐标系
-
-工程 `maps` 目录提供二维占据栅格地图：
-
-| 场景 | YAML | 图像 |
+| 项目 | 室内 | 室外 |
 | --- | --- | --- |
-| 室内 | `maps/indoor.yaml` | `maps/indoor.pgm` |
-| 室外 | `maps/outdoor.yaml` | `maps/outdoor.pgm` |
+| 场景文件 | `worlds/indoor_world.sdf` | `worlds/outdoor_world.sdf` |
+| 规模 | 约 50 × 50 m | 约 40 × 25 m，面积约 1000 m² |
+| 布局 | 十字通道、八个房间、家具与设备 | 石油化工设施、储罐、管廊与外围闭环道路 |
+| Gazebo 初始位置 | `(0, 0, 0)` | `(0, -9, 0)` |
+| SuperSLAM 地图目录 | `map_sim/indoor` | `map_sim/outdoor` |
+| Nav2 二维地图 | `maps/indoor.yaml`、`indoor.pgm` | `maps/outdoor.yaml`、`outdoor.pgm` |
+| 固定路线 | `routes/indoor_route.geojson` | `routes/outdoor_route.geojson` |
+| 巡检任务 | `config/indoor_patrol_tasks.yaml` | `config/outdoor_patrol_tasks.yaml` |
 
-Nav2 的二维地图和 SuperSLAM 的三维先验地图必须具有一致的坐标轴和原点。地图 YAML 中的 `origin` 由 map_server 自动应用，不要重复写入 TF 平移量。若替换地图，应确认二维地图与对应的 SuperSLAM 地图坐标系一致；坐标系不同则先标定 `map -> world` 变换。
+SuperSLAM 保存三维先验地图及回环数据库；Nav2 使用另行提供的二维 PGM 和 YAML 文件。室内、室外先验地图应分别保存，保留各目录中的回环地图和附属文件。
 
-### Gazebo Transport 分区
+二维地图、三维地图和路线图必须使用一致的原点与坐标轴。当前导航发布单位静态变换 `map → world`；地图 YAML 的 `origin` 由地图服务器处理，不要重复加入 TF。若地图坐标系不同，需先标定并调整该变换。
 
-仿真辅助 launch `gazebo_simulation.launch.py` 会启动 Gazebo、机器人状态发布器和 ROS-Gazebo 桥接。每次启动会创建独立的 Gazebo Transport 分区，避免上次遗留的 Gazebo 服务端提供旧模型的传感器数据或处理本次生成请求。需要直接使用 Gazebo CLI 检查时，给 launch 传入 `gz_partition:=sim_robot_debug`，并在 CLI 终端设置 `GZ_PARTITION=sim_robot_debug`。ROS 话题名称不变。
+## 3. 建图与手动控制
 
-## 机器人模型与传感器
+### 启动建图
 
-### 实测尺寸与坐标
-
-以下坐标以 `base_footprint` 为原点，原点位于底盘中心在地面的投影处，+X 朝前、+Y 朝左、+Z 朝上。传感器位置表示各自坐标系原点，传感器间旋转按单位阵处理。激光雷达外壳绘制在安装坐标系上方，外壳底部高度为 0.539 m；仿真扫描使用相同的坐标系原点，没有额外的光学原点偏移。
-
-| 参数 | 数值（m） |
-| --- | --- |
-| 前后轮中心距 | 0.580 |
-| 左右轮中心距 | 0.454 |
-| 全向轮半径 / 宽度 | 0.125 / 0.050 |
-| 轮中心位置 | X = ±0.290，Y = ±0.227，Z = 0.125 |
-| 激光雷达原点 | (0.343, 0, 0.539) |
-| IMU 原点 | (-0.1955, 0, 0.368) |
-| IMU 坐标系下的激光雷达原点 | (0.5385, 0, 0.171) |
-| IMU 坐标系下的底盘原点 | (0.1955, 0, -0.368) |
-
-机器人外壳的准确尺寸和质量尚未提供。仿真模型沿用原有外壳比例，尺寸缩放为 0.60 × 0.40 × 0.15 m，外壳中心高度为 Z = 0.2125 m。外壳质量为 8 kg，每个车轮质量为 0.6 kg；惯量按新几何形状更新。车轮包络尺寸为 0.830 × 0.504 m。Nav2 足迹边界为 X = ±0.415 m、Y = ±0.252 m，并额外留出 0.02 m 裕量。
-
-### 麦克纳姆轮模型
-
-四个驱动关节用各向异性摩擦近似麦克纳姆轮滚子的运动效果。模型没有独立滚子关节，适合导航和 SLAM 仿真，不用于精确分析滚子接触动力学。
-
-滚子摩擦方向以 `base_footprint` 表示，因此相对车身固定并随车轮转动。左前轮和右后轮沿 `[1, -1, 0]` 方向产生牵引，其余两个车轮沿 `[1, 1, 0]` 方向产生牵引，垂直方向允许滑动。若将摩擦方向设在旋转的车轮坐标系中，仿真横移和转向会异常，即使轮式里程计显示的速度正确。
-
-### IMU 与激光雷达
-
-IMU 每个轴均叠加均值为零的高斯白噪声：加速度标准差为 0.05 m/s²，角速度标准差为 0.1°/s（0.001745 rad/s）。此外还有较小的启动零偏（加速度标准差 0.005 m/s²、角速度标准差 0.01°/s）和相关时间为 3600 s 的缓慢相关偏置漂移。偏置量相对 BMI088 数据手册中的零偏限值较小。
-
-激光雷达设置为每圈 1024 个水平采样点、16 个垂直通道（-15° 至 +15°）、10 Hz 扫描频率，量程为 0.2 至 60 m。参数可在 `urdf/sim_robot.urdf.xacro` 中调整。Gazebo 在 `/lidar/points/points` 发布打包点云，ROS 桥接后话题为 `/lidar/points`。
-
-## ROS 话题与手动控制
-
-### 主要话题
-
-| 话题 | ROS 类型 | 数据方向 | 说明 |
-| --- | --- | --- | --- |
-| `/cmd_vel` | `geometry_msgs/msg/Twist` | ROS 到 Gazebo | 麦克纳姆底盘速度指令：前进、横移和转向 |
-| `/wheel/odometry` | `nav_msgs/msg/Odometry` | Gazebo 到 ROS | 轮式里程计；仅仿真桥接模式会桥接其 TF |
-| `/tf` | `tf2_msgs/msg/TFMessage` | Gazebo 或 ROS | 仿真模式使用 Gazebo 车轮 TF；导航模式使用 SuperSLAM 定位 TF |
-| `/tf_static` | `tf2_msgs/msg/TFMessage` | ROS | 机器人连杆 TF；导航 launch 还添加 `map -> world` 和 `imu -> base_footprint` |
-| `/joint_states` | `sensor_msgs/msg/JointState` | Gazebo 到 ROS | 车轮关节位置和速度 |
-| `/imu/data` | `sensor_msgs/msg/Imu` | Gazebo 到 ROS | `imu_link` 坐标系下的 IMU 数据 |
-| `/lidar/points` | `sensor_msgs/msg/PointCloud2` | Gazebo 到 ROS | `lidar_link` 坐标系下的 16 线点云 |
-| `/clock` | `rosgraph_msgs/msg/Clock` | Gazebo 到 ROS | 仿真时钟 |
-
-### 键盘遥控
-
-仿真运行时，在另一个终端加载 ROS 和工作区环境，启动键盘节点：
+按场景选择一条命令，均会启动仿真、SuperSLAM 建图和 RViz：
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-source /home/guofeng/work/code/SuperSLAM/install/setup.bash
+# 室内
+ros2 launch sim_robot_slam indoor_mapping.launch.py
+
+# 室外
+ros2 launch sim_robot_slam outdoor_mapping.launch.py
+```
+
+建图默认开启 RViz 和仿真时钟。可追加 `rviz:=false` 关闭 RViz，或用 `map_dir:=/绝对路径/地图目录` 修改保存目录。
+
+在另一个终端启动键盘控制，移动机器人采集场景。完成后先停车、退出键盘节点，再在建图终端按 `Ctrl-C`，等待地图和回环数据库保存完成。
+
+### 键盘控制
+
+```bash
 ros2 run teleop_twist_keyboard teleop_twist_keyboard \
   --ros-args -p stamped:=false -r cmd_vel:=/cmd_vel
 ```
 
-控制时保持键盘终端处于焦点状态：
+操作时保持键盘终端有焦点：
 
 | 按键 | 动作 |
 | --- | --- |
 | `i` / `,` | 前进 / 后退 |
 | `j` / `l` | 左转 / 右转 |
-| 按住 Shift 再按 `J` / `L` | 左移 / 右移 |
-| 按住 Shift 再按 `I` / `<` | 前进 / 后退 |
+| `Shift + J` / `Shift + L` | 左移 / 右移 |
 | `k` | 停止 |
-| `q` / `z` | 同时提高 / 降低线速度和转向速度上限 |
-| `w` / `x` | 提高 / 降低线速度 |
-| `e` / `c` | 提高 / 降低转向速度 |
+| `q` / `z` | 同时增大 / 减小线速度和角速度 |
+| `w` / `x` | 增大 / 减小线速度 |
+| `e` / `c` | 增大 / 减小角速度 |
 
-按 `Ctrl-C` 退出。键盘节点在 `/cmd_vel` 发布 `geometry_msgs/msg/Twist`，与 Gazebo 驱动插件输入一致。
+导航开始前，按 `k` 停车并用 `Ctrl-C` 退出键盘节点，避免多个节点同时向 `/cmd_vel` 发送指令。
 
-### 直接发布速度指令
+## 4. 定位与导航
 
-速度指令使用机器人本体坐标系：`linear.x` 为前进速度，`linear.y` 为左移速度，单位均为 m/s；`angular.z` 为转向角速度，单位为 rad/s。正角速度表示逆时针旋转。
+### 一键启动
 
-前进：
-
-```bash
-ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2}, angular: {z: 0.0}}" -r 10
-```
-
-原地转向：
+确认对应的三维先验地图、回环数据库和二维地图已准备好，再选择场景：
 
 ```bash
-ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: 0.5}}" -r 10
+# 室内
+ros2 launch sim_robot_slam indoor_navigation.launch.py rviz:=true
+
+# 室外
+ros2 launch sim_robot_slam outdoor_navigation.launch.py rviz:=true
 ```
 
-向左横移：
+两种启动方式均包含仿真、SuperSLAM 全局重定位、Nav2、巡检节点，以及导航和重定位两个 RViz 窗口。
+
+### 发送导航目标
+
+1. 等待 SuperSLAM 全局重定位成功，无需手动设置初始位姿。
+2. Nav2 在二维地图、有效的 `/lio/localization_state` 和 `map → base_footprint` TF 就绪后自动激活。
+3. 在导航 RViz 选择 **Nav2 Goal**，在可通行区域按住鼠标左键，拖动设置朝向后释放。
+4. 机器人开始执行单目标导航；固定路线巡检按第 5 节操作。
+
+如需先遥控辅助定位，完成后停车并退出键盘节点，再发送导航目标。需要手动激活 Nav2 时，可传入 `autostart:=false`。
+
+### 常用启动参数
+
+| 参数 | 室内默认值 | 室外默认值 | 用途 |
+| --- | --- | --- | --- |
+| `map` | 包内 `maps/indoor.yaml` | 包内 `maps/outdoor.yaml` | Nav2 二维地图 |
+| `map_dir` | `map_sim/indoor` | `map_sim/outdoor` | SuperSLAM 先验地图目录 |
+| `route_graph` | 包内 `routes/indoor_route.geojson` | 包内 `routes/outdoor_route.geojson` | 固定路线图 |
+| `route_start_id` | `1` | `0` | 巡检起点 |
+| `route_goal_id` | `10` | `0` | 巡检终点 |
+| `route_via_ids` | 空字符串 | `9` | 按顺序经过的中间节点，逗号分隔 |
+| `task_config` | 包内室内任务 YAML | 包内室外任务 YAML | 巡检点任务；空字符串表示不执行任务 |
+| `rviz` | `true` | `true` | 启动导航和重定位 RViz |
+| `autostart` | `true` | `true` | 就绪后自动激活 Nav2 |
+| `use_sim_time` | `true` | `true` | 使用 Gazebo 仿真时钟 |
+
+## 5. 固定路线巡检
+
+### 开始与取消
+
+导航启动文件会加载路线图，但不会自动开始巡检。定位和 Nav2 就绪后，在另一个终端调用：
 
 ```bash
-ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {y: 0.2}}" -r 10
+# 开始一次巡检
+ros2 service call /route_patrol/start std_srvs/srv/Trigger '{}'
+
+# 取消当前巡检
+ros2 service call /route_patrol/cancel std_srvs/srv/Trigger '{}'
 ```
 
-停止时发布零速度。Gazebo 驱动插件会保留最近一次指令，仅停止发布器不会让机器人停下：
+机器人距路线起点超过 0.25 m 时，先导航到起点。之后按图边逐段行驶，到点停稳并完成任务后再执行下一段；每段开始先对齐方向，导航横向速度为零。巡检完成后停止，再次调用开始服务可重新执行。
+
+### 室内路线
+
+路线图为单向链 `0 → 1 → … → 10`，默认从节点 1 出发，到节点 10 完成后结束，没有回程边。
 
 ```bash
-ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: 0.0}}"
+ros2 launch sim_robot_slam indoor_navigation.launch.py \
+  rviz:=true route_start_id:=1 route_goal_id:=10
 ```
 
-查看传感器和里程计：
+### 室外闭环
+
+路线图已包含 `9 → 0` 回程边，默认行驶 `0 → 1 → … → 9 → 0`，返回节点 0 后结束一圈。
 
 ```bash
-ros2 topic echo /wheel/odometry
-ros2 topic echo /imu/data
-ros2 topic echo /lidar/points --once
-ros2 topic hz /lidar/points
+ros2 launch sim_robot_slam outdoor_navigation.launch.py \
+  rviz:=true route_start_id:=0 route_goal_id:=0 route_via_ids:=9
 ```
 
-仅运行仿真时，RViz2 固定坐标系设为 `odom`；SuperSLAM 发布定位变换后设为 `map`。添加 `PointCloud2` 显示并订阅 `/lidar/points`，可靠性策略设为 `Best Effort`。机器人状态发布器和 IMU 到底盘的固定变换提供点云从 `lidar_link` 到机器人坐标系的 TF 路径。
+起终点同为 0 时，必须指定一个不同的中间节点。巡检节点先规划 `0 → 9` 和 `9 → 0`，两段均成功后才开始行驶。当前图只有单向闭环，指定中间节点 9 即可经过全部节点；以后若加入捷径，可设置 `route_via_ids:="1,2,3,4,5,6,7,8,9"` 明确访问顺序。
 
-## Nav2 与 SuperSLAM 配置
+### 自定义路线与显示
 
-### 地图与定位坐标系
+通过路线绘制工具创建并保存 GeoJSON：
 
-Nav2 使用二维占据栅格地图，SuperSLAM 使用保存的三维点云地图进行全局重定位。导航 launch 发布单位变换 `map -> world`，所以二维地图和 SuperSLAM 地图必须具有相同的原点和坐标轴。地图 YAML 的 `origin` 由 map_server 自动应用，不应重复写入 TF 平移量。若替换的二维地图来自其他坐标系，应先标定 `map -> world` 变换。
+```bash
+ros2 launch nav2_rviz_plugins route_tool.launch.py \
+  yaml_filename:=/绝对路径/地图.yaml
+```
 
-室内先验地图位于 `map_sim/indoor/loop/map.pcd`，室外先验地图位于 `map_sim/outdoor`。SuperSLAM 会在回环地图旁保存固定名称的 Scan Context 附属文件，因此室内、室外地图必须保存在不同目录。
+路线图应与地图坐标系一致，拐弯处设置节点。启动导航时加载保存的文件：
 
-### 导航专用点云
+```bash
+ros2 launch sim_robot_slam indoor_navigation.launch.py \
+  route_graph:=/绝对路径/路线.geojson \
+  route_start_id:=1 route_goal_id:=10
+```
 
-SuperSLAM 额外发布供局部代价地图使用的点云：
+RViz 中绿色 **Patrol Route** 显示 `/route_patrol/path` 的完整巡检路线，蓝色 **Global Path** 显示 `/plan` 的最新导航路径。完整路线在全部规划成功后发布，结束或取消后保留，下一次有效启动时清空旧路线。
 
-| 话题 | 坐标系 | 用途 |
+沿用旧 RViz 配置时，新增 **Path** 显示项，订阅 `/route_patrol/path`，将持久性（Durability Policy）设为 **Transient Local**、可靠性设为 **Reliable**。这样 RViz 晚启动也能获取完整路线。
+
+## 6. 巡检点任务
+
+任务在室内、室外各自的 `config/*_patrol_tasks.yaml` 中配置，节点编号对应 GeoJSON 的 `properties.id`。同一节点的任务按列表顺序执行，未配置任务的节点停稳后继续行驶。
+
+默认任务为：节点 1 逆时针旋转一周并等待 2 秒，节点 2 等待 5 秒，节点 5 顺时针旋转一周。
+
+```yaml
+failure_policy: stop
+points:
+  1:
+    - type: spin
+      angle_deg: 360.0
+      timeout_sec: 30.0
+    - type: wait
+      duration_sec: 2.0
+  2:
+    - type: wait
+      duration_sec: 5.0
+  5:
+    - type: spin
+      angle_deg: -360.0
+      timeout_sec: 30.0
+```
+
+| 任务 | 参数 | 说明 |
 | --- | --- | --- |
-| `/lio/cloud_nav` | `base_footprint` | 去除地面点后标记障碍物 |
-| `/lio/cloud_nav_clearing` | `lidar_link` | 使用当前帧射线清障，保留地面回波 |
+| `spin` | `angle_deg` | 旋转角度，单位度；正数逆时针，负数顺时针 |
+| `spin` | `timeout_sec` | 超时时间，默认 30 秒；旋转速度上限为 0.6 rad/s |
+| `wait` | `duration_sec` | 停留时间，单位秒 |
+| `wait` | `timeout_sec` | 可选，默认停留时间加 10 秒，必须大于停留时间 |
 
-两个话题类型为 `sensor_msgs/PointCloud2`，包含 x/y/z/intensity 字段并使用 Best Effort QoS。SuperSLAM 按相对机器人地面投影的高度过滤点云，只保留高度 0.05–1.5 m、距雷达 6 m 内的点，避免把倾斜世界中的地面误认为障碍物。原始 `/lidar/points` 继续供 SLAM 和 Collision Monitor 使用；Collision Monitor 会在机器人坐标系中单独过滤高度。
-
-在 `super_slam/config/SimMapping.yaml` 和 `SimRelocation.yaml` 中，`lio.navigation.accumulation_frames: 3` 和 `max_age: 0.3` 保留短时点云历史。历史帧通过世界位姿对齐到当前底盘坐标系，再执行 0.05 m 体素滤波。动态环境可将累计帧数改为 1，以减少移动物体拖影。
-
-清障只使用单帧点云和真实雷达原点，不使用累计点云生成射线。定位丢失或搜索、时钟重置、超过 max_age 的时间间隔，或相邻帧位姿跳变超过 1 m / 0.5 rad 时，历史点云会清空。点云按处理后的雷达频率发布，与可视化设置无关。
-
-有效跟踪时，SuperSLAM 会在激光雷达帧之间根据 IMU 积分发布 `world -> imu` TF，支持 Nav2 查询中间时刻的位姿。局部点云源以消息坐标系为原点：障碍物标记以底盘中心为原点，清障以雷达原点为原点。点云有效期为 1.0 s，用于容纳处理抖动并在观测过期时停止控制。
-
-局部体素地图覆盖世界 Z 范围 [-0.5, 1.9] m；这是体素层范围，不是地面过滤阈值。地形超出此范围时应调整体素范围。低于 `lio.navigation.min_height` 的点也会被过滤，可按低矮障碍检测需求调整。修改后需重启 SuperSLAM 和 Nav2；重启 Nav2 会创建新的局部代价地图。也可以调用服务清空当前局部地图：
+可指定自定义文件，或关闭任务：
 
 ```bash
-ros2 service call /local_costmap/clear_entirely_local_costmap nav2_msgs/srv/ClearEntireCostmap '{}'
+ros2 launch sim_robot_slam outdoor_navigation.launch.py \
+  task_config:=/绝对路径/巡检任务.yaml
+
+ros2 launch sim_robot_slam outdoor_navigation.launch.py task_config:=""
 ```
 
-### 速度、足迹与控制器
+每次开始巡检会重新读取任务文件。自定义绝对路径文件可直接修改，下一次巡检生效；修改包内默认配置后重新编译。
 
-MPPI 和速度平滑器的最大前进速度为 0.80 m/s。航向对准最大角速度为 0.60 rad/s；MPPI、原地旋转恢复行为和速度平滑器的转向角速度上限均为 ±0.60 rad/s。速度平滑器限制后退恢复速度为 0.25 m/s，停靠行为速度为 0.15 m/s。线速度单位为 m/s，角速度单位为 rad/s；键盘直接向 `/cmd_vel` 发布的速度仍由键盘节点限速。
+执行规则：
 
-全局和局部膨胀半径均为 0.55 m，`cost_scaling_factor: 10.0` 使障碍物代价更快衰减。膨胀半径从障碍物边缘开始计算，不会额外加在机器人足迹之外。当前带裕量的足迹外接圆半径约为 0.513 m；修改机器人尺寸后应重新评估膨胀参数。
+- 起点、终点均执行对应任务；闭环节点 0 若配置任务，出发和返回时各执行一次。
+- 任务使用仿真时钟，暂停 Gazebo 时暂停计时；收到首帧 `/clock` 后才接受开始请求。
+- 停车确认使用 `/wheel/odometry`：线速度不超过 0.02 m/s、角速度不超过 0.02 rad/s，连续保持 0.3 秒，数据不超过 1 秒。默认 5 秒内未停稳则结束巡检。
+- 当前仅支持 `failure_policy: stop`。任务失败或超时后停止巡检，不自动重试；取消会等待当前导航或任务结束。
+- 配置错误会拒绝开始；不在本次路线中的任务会提示并忽略。
 
-Nav2 使用 `RotationShimController` 包装 MPPI 的 `DiffDrive` 运动模型。新路径初始航向误差大于 0.10 rad（约 5.7°）时，先原地转向；误差低于 0.05 rad（约 2.9°）后，MPPI 才开始前进并沿路径转向。MPPI 路径跟踪不倒车，但后退恢复行为仍可倒车。`vy_max` 和速度平滑器的横向速度上限均为零，因此 Nav2 不会横移；键盘控制仍可使用麦克纳姆底盘横移。到达目标点时，机器人会转向 RViz 中设置的目标朝向。NavFn 只提供路径位置，初始航向根据路径几何计算。从前进切换为原地旋转时，速度平滑器先降低前进速度再将其归零。
+## 7. 分开启动各模块
 
-默认导航 RViz 配置为 `config/nav2.rviz`，显示地图、机器人模型、全局和局部代价地图及规划路径，并提供 Navigation 2 面板和 Nav2 Goal 工具。机器人模型默认启用，从 latched 话题 `/robot_description` 读取。默认视图不包含传感器调试显示和 AMCL 工具。
-
-### SuperSLAM 外参与旧地图兼容性
-
-SuperSLAM 的 `SimMapping.yaml` 和 `SimRelocation.yaml` 使用以下外参：
-
-- `lio.extrinsic.lidar_imu` 平移为 `[0.5385, 0.0, 0.171]`，旋转为单位阵。
-- `lio.extrinsic.odom_robo` 为 `[-0.1955, 0.0, 0.368, 0.0, 0.0, 0.0]`。
-- `lio.loop.sc_lidar_height` 为 `0.539`。
-
-全局重定位前，应使用这些参数重新建立 SuperSLAM 先验地图和 Scan Context 数据库。地图档案包含传感器外参和高度信息，旧数据库不能直接复用。只有现有二维地图与新点云地图的原点和坐标轴一致时才能继续使用；否则应标定 `map -> world` 变换或重新生成二维栅格地图。
-
-Collision Monitor 的 `pointcloud.min_range` 为 0.20 m，与激光雷达最小测距一致。按当前简化外壳和安装位置，向下的激光束从机器人自身碰撞几何上方通过，因此不再使用旧的 0.30 m 自身回波裁剪距离。此设置只影响 Collision Monitor，原始 `/lidar/points` 保持不变。若外壳或雷达安装位置发生变化，应重新评估自身回波过滤。
-
-## 故障排查提示
-
-### 检查重定位与 TF
-
-查看 SuperSLAM 定位状态，并检查地图到机器人底盘的 TF：
+用于单独启停仿真、SuperSLAM 和 Nav2。每个终端先完成第 1 节的公共准备，再设置本工程安装目录：
 
 ```bash
+SIM_SHARE="$(ros2 pkg prefix sim_robot_slam)/share/sim_robot_slam"
+```
+
+### 终端 1：仿真
+
+导航使用 `bridge_nav2.yaml`，关闭 Gazebo 的底盘定位 TF，避免与 SuperSLAM 冲突。
+
+```bash
+# 室内：由启动文件生成机器人
+ros2 launch sim_robot_slam gazebo_simulation.launch.py \
+  world:="$SIM_SHARE/worlds/indoor_world.sdf" \
+  bridge_config:="$SIM_SHARE/config/bridge_nav2.yaml" spawn_robot:=true
+
+# 室外：场景文件已内置机器人
+ros2 launch sim_robot_slam gazebo_simulation.launch.py \
+  world:="$SIM_SHARE/worlds/outdoor_world.sdf" \
+  bridge_config:="$SIM_SHARE/config/bridge_nav2.yaml" spawn_robot:=false
+```
+
+单独建图时，将桥接配置改为 `bridge.yaml`，终端 2 改用建图启动命令，并跳过终端 3、4。
+
+### 终端 2：SuperSLAM 与 RViz
+
+导航时启动重定位，按场景选择地图目录：
+
+```bash
+# 室内
+ros2 launch super_slam SimRelocation.py \
+  use_sim_time:=true rviz:=true map_dir:=map_sim/indoor
+
+# 室外
+ros2 launch super_slam SimRelocation.py \
+  use_sim_time:=true rviz:=true map_dir:=map_sim/outdoor
+```
+
+单独建图时，将 `SimRelocation.py` 改为 `SimMapping.py`，其余参数相同。建图与重定位选择其一运行；两个启动文件都会同时启动对应的 SuperSLAM 节点和 RViz。
+
+### 终端 3：Nav2 与导航 RViz
+
+```bash
+# 室内
+ros2 launch sim_robot_slam nav2.launch.py \
+  map:="$SIM_SHARE/maps/indoor.yaml" \
+  route_graph:="$SIM_SHARE/routes/indoor_route.geojson" rviz:=true
+
+# 室外
+ros2 launch sim_robot_slam nav2.launch.py \
+  map:="$SIM_SHARE/maps/outdoor.yaml" \
+  route_graph:="$SIM_SHARE/routes/outdoor_route.geojson" rviz:=true
+```
+
+该启动文件默认使用仿真时钟，在定位就绪后激活 Nav2。它只启动导航部分，不启动仿真、重定位或巡检节点；普通目标导航进行到此步骤即可。
+
+### 终端 4：固定路线巡检节点（可选）
+
+```bash
+# 室内
+ros2 run sim_robot_slam route_patrol --ros-args \
+  -p use_sim_time:=true -p start_id:=1 -p goal_id:=10 \
+  -p task_config:="$SIM_SHARE/config/indoor_patrol_tasks.yaml"
+
+# 室外闭环；via_ids 是字符串，保留下面的引号
+ros2 run sim_robot_slam route_patrol --ros-args \
+  -p use_sim_time:=true -p start_id:=0 -p goal_id:=0 -p via_ids:="'9'" \
+  -p task_config:="$SIM_SHARE/config/outdoor_patrol_tasks.yaml"
+```
+
+在另一个终端调用第 5 节的开始或取消服务。单独运行节点时，参数名称为 `start_id`、`goal_id`、`via_ids`，不带启动文件中的 `route_` 前缀。
+
+## 8. 模型与关键配置
+
+### 机器人与传感器
+
+模型配置为 `urdf/sim_robot.urdf.xacro`。以 `base_footprint` 为地面投影原点，X 向前、Y 向左、Z 向上；IMU 与激光雷达之间旋转为单位阵。
+
+| 参数 | 当前值 |
+| --- | --- |
+| 前后轮距 / 左右轮距 | 0.580 / 0.454 m |
+| 轮半径 / 宽度 | 0.125 / 0.050 m |
+| 轮中心 | `(±0.290, ±0.227, 0.125)` m |
+| 激光雷达原点 | `(0.343, 0, 0.539)` m |
+| IMU 原点 | `(-0.1955, 0, 0.368)` m |
+| 激光雷达相对 IMU 的平移 | `(0.5385, 0, 0.171)` m |
+| 激光雷达扫描 | 16 线、水平 1024 点、10 Hz、垂直 ±15°、量程 0.2–60 m |
+| IMU 白噪声标准差 | 加速度 0.05 m/s²；角速度 0.1°/s |
+| IMU 启动零偏标准差 | 加速度 0.005 m/s²；角速度 0.01°/s |
+| IMU 偏置漂移相关时间 | 3600 秒 |
+
+外壳为简化模型，尺寸 0.60 × 0.40 × 0.15 m，质量 8 kg，每轮质量 0.6 kg。车轮包络为 0.830 × 0.504 m。麦克纳姆轮使用相对车身固定的各向异性摩擦近似滚子接触。
+
+SuperSLAM 的 `SimMapping.yaml` 和 `SimRelocation.yaml` 应保持一致的外参：`lio.extrinsic.lidar_imu` 平移 `[0.5385, 0, 0.171]`，旋转为单位阵；`lio.extrinsic.odom_robo` 为 `[-0.1955, 0, 0.368, 0, 0, 0]`。更改传感器位置或外参后，重新建立先验地图和回环数据库。
+
+### 导航参数
+
+配置文件为 `config/nav2_params.yaml`，默认 RViz 配置为 `config/nav2.rviz`。
+
+| 参数项 | 当前设置 |
+| --- | --- |
+| 最大前进速度 | 0.80 m/s |
+| 最大转向角速度 | 0.60 rad/s |
+| 后退恢复速度上限 | 0.25 m/s |
+| 导航横向速度 | 0，禁止横移 |
+| 控制器 | 航向对准控制器（RotationShim）与 MPPI，使用 DiffDrive 运动模型 |
+| 先转向阈值 / 恢复前进阈值 | 0.10 / 0.05 rad |
+| 足迹半长 / 半宽 / 额外裕量 | 0.415 / 0.252 / 0.02 m |
+| 全局、局部膨胀半径 | 0.55 m，代价衰减系数 10.0 |
+
+导航速度上限不作用于直接向 `/cmd_vel` 发布的键盘指令。机器人底盘仍支持手动横移。
+
+导航 TF 链为 `map → world → imu → base_footprint → base_link → lidar_link`。其中 `map → world` 为单位静态变换，`world → imu` 由 SuperSLAM 发布，`imu → base_footprint` 静态平移为 `(0.1955, 0, -0.368)` m。
+
+### 主要话题与导航点云
+
+| 话题 | 消息类型 | 用途 |
+| --- | --- | --- |
+| `/cmd_vel` | `geometry_msgs/msg/Twist` | 底盘执行指令：`linear.x` 前进、`linear.y` 左移，单位 m/s；`angular.z` 逆时针转向，单位 rad/s |
+| `/cmd_vel_smoothed` | `geometry_msgs/msg/Twist` | 平滑后的导航速度，进入碰撞检测 |
+| `/wheel/odometry` | `nav_msgs/msg/Odometry` | 轮式里程计，速度字段为 `twist.twist` |
+| `/joint_states` | `sensor_msgs/msg/JointState` | 车轮关节位置、速度 |
+| `/imu/data` | `sensor_msgs/msg/Imu` | 原始 IMU 数据，坐标系为 `imu_link` |
+| `/lidar/points` | `sensor_msgs/msg/PointCloud2` | 原始点云，供 SuperSLAM 和碰撞检测使用 |
+| `/lio/cloud_nav` | `sensor_msgs/msg/PointCloud2` | 底盘坐标系内过滤后的点云，标记障碍物 |
+| `/lio/cloud_nav_clearing` | `sensor_msgs/msg/PointCloud2` | 雷达坐标系内的当前帧点云，用射线清障 |
+| `/route_patrol/path` | `nav_msgs/msg/Path` | 完整巡检路线 |
+| `/clock` | `rosgraph_msgs/msg/Clock` | 仿真时钟 |
+
+导航点云在 SuperSLAM 仿真配置中按相对 `base_footprint` 的高度过滤：默认保留 0.05–1.5 m、雷达 6 m 范围内的点，累计 3 帧且不超过 0.3 秒，再进行 0.05 m 体素滤波。原始点云不受影响。
+
+标记可使用累计点云，清障只使用当前帧与真实雷达原点。定位丢失、时钟重置或位姿明显跳变时清空历史；动态场景可将 `lio.navigation.accumulation_frames` 设为 1。局部体素层的世界高度范围为 -0.5–1.9 m，需与场景地形适配。
+
+## 9. 常见问题
+
+### 定位完成后 Nav2 仍未激活
+
+检查二维地图、定位状态和 TF，再查看节点生命周期：
+
+```bash
+ros2 topic info /map
 ros2 topic echo /lio/localization_state
 ros2 run tf2_ros tf2_echo map base_footprint
+ros2 lifecycle get /controller_server
 ```
 
-Nav2 未激活时，先确认 `/lio/localization_state` 有效、地图已发布，并且 `map -> base_footprint` TF 可查询。Nav2 定位就绪门控会在这些条件满足后激活导航。
+若控制器已退出，先查看退出前的参数或插件报错。局部代价地图的 `width`、`height` 使用整数，例如 `5`，不要写成 `5.0`。
 
-### RViz 中没有地图或机器人模型
+### 规划成功但机器人不动，或巡检报错 105
 
-确认地图 YAML 和对应 PGM 文件路径有效，地图坐标系与 SuperSLAM 先验地图一致。地图文件变化后重新构建 `sim_robot_slam` 并重新 source 工作区。默认导航 RViz 从 `/robot_description` 获取机器人模型，检查机器人状态发布器是否运行以及该话题是否存在。
+错误 105 表示未取得足够运动进展。终端反馈的剩余距离是当前路径段的距离。停车时检查以下话题，确认是控制器无速度、碰撞检测拦截还是底盘未执行：
 
-### 点云没有显示
+```bash
+ros2 topic echo /cmd_vel_smoothed
+ros2 topic echo /cmd_vel
+ros2 topic echo /collision_monitor_state
+ros2 lifecycle get /collision_monitor
+```
 
-GPU 激光雷达使用 Gazebo Ogre2 传感器渲染器，生成点云需要可用的图形驱动和 OpenGL 支持。检查 `/lidar/points` 是否持续发布；在 RViz 中将固定坐标系设为 `map` 或 `odom`，并将 PointCloud2 可靠性策略设为 Best Effort。
+同时检查局部代价地图是否误标地面、定位 TF 是否连续，以及键盘节点是否已经退出。
+
+### RViz 没有地图、模型或完整巡检路线
+
+- 地图：确认 YAML 中的图像路径有效，二维地图与先验地图坐标系一致；分开启动 Nav2 时必须显式指定 `map`。
+- 模型：确认 `robot_state_publisher` 正在运行，`/robot_description` 和机器人 TF 存在，启用 **RobotModel**。
+- 路线：查看绿色 **Patrol Route**。`/plan` 由多个规划节点更新，只显示最新路径；完整巡检路线使用 `/route_patrol/path` 和 **Transient Local** 持久性。
+- 原始点云：检查 `/lidar/points` 是否持续发布；仅运行普通仿真时固定坐标系用 `odom`，导航时用 `map`，点云可靠性设为 **Best Effort**。GPU 激光雷达需要可用的图形驱动与 OpenGL。
+
+### 局部代价地图出现地面圆环
+
+检查 `/lio/cloud_nav` 的地面过滤和清障点云。修改过滤参数后重启 SuperSLAM 与 Nav2；也可清空当前局部地图：
+
+```bash
+ros2 service call /local_costmap/clear_entirely_local_costmap \
+  nav2_msgs/srv/ClearEntireCostmap '{}'
+```
+
+### Gazebo 看不到室外机器人
+
+室外 SDF 已内置机器人，独立启动时使用 `spawn_robot:=false`。在实体树中检查 `sim_robot_slam`，并确认相机位置和启动日志。
+
+每次仿真启动默认创建独立的 Gazebo 通信分区。使用 Gazebo 命令行排查时，可给启动文件传入 `gz_partition:=sim_robot_debug`，并在命令行终端执行 `export GZ_PARTITION=sim_robot_debug`。
+
+### 保存启动日志
+
+```bash
+ros2 launch sim_robot_slam outdoor_navigation.launch.py rviz:=true 2>&1 | tee nav2.log
+```
+
+ROS 默认日志目录为 `~/.ros/log`。定位进程退出原因时，查看 `process has died` 之前的报错。
