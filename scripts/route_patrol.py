@@ -3,10 +3,15 @@
 """Execute a route graph path with Nav2's Route Server and controller."""
 
 import math
+import json
 import time
+import uuid
+import sqlite3
+from datetime import datetime, timezone
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path as FilePath
 
 import rclpy
@@ -15,9 +20,13 @@ from action_msgs.msg import GoalStatus
 from nav2_msgs.action import ComputeRoute, FollowPath, NavigateToPose, Spin, Wait
 from nav2_msgs.msg import RouteNode
 from nav_msgs.msg import Odometry, Path
+from nav_msgs.msg import OccupancyGrid
+from geometry_msgs.msg import PolygonStamped
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.clock import Clock, ClockType
 from rclpy.qos import (
     DurabilityPolicy,
     QoSProfile,
@@ -25,8 +34,13 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from rclpy.time import Time
-from std_srvs.srv import Trigger
+from std_srvs.srv import SetBool, Trigger
+from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
+from super_slam.msg import LocalizationState
+from unique_identifier_msgs.msg import UUID
+from task_journal import TaskJournal
+from web_mission import occupancy_fingerprint, parse_mission, validate_footprints, yaw_of
 
 
 @dataclass(frozen=True)
@@ -187,6 +201,10 @@ class RoutePatrol(Node):
         self.declare_parameter("start_tolerance", 0.25)
         self.declare_parameter("stop_timeout_sec", 5.0)
         self.declare_parameter("stop_settle_time_sec", 0.3)
+        self.declare_parameter("web_mission", "")
+        self.declare_parameter("web_freshness_sec", 1.0)
+        self.declare_parameter("costmap_freshness_sec", 3.0)
+        self.declare_parameter("resume_tolerance", 0.5)
 
         self._start_id = int(self.get_parameter("start_id").value)
         self._goal_id = int(self.get_parameter("goal_id").value)
@@ -221,6 +239,19 @@ class RoutePatrol(Node):
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
             ),
         )
+        self._active_path_publisher = self.create_publisher(
+            Path, "/route_patrol/active_path",
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        self._status_publisher = self.create_publisher(
+            String, "/route_patrol/status",
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        self._run_id = None
+        self._last_outcome = None
+        self._last_summary = {}
         self._tf_buffer = Buffer(node=self)
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._odom_speed = None
@@ -232,6 +263,43 @@ class RoutePatrol(Node):
             qos_profile_sensor_data,
         )
         self._state = "idle"
+        self._executor_instance = str(uuid.uuid4())
+        self._web_task = None
+        self._pending_web_task = None
+        self._last_web_task_id = None
+        self._events = []
+        self._event_seq = 0
+        self._journal = None
+        self._journal_failed = False
+        self._pending_goal = None
+        self._completed_points = 0
+        self._send_pending = False
+        self._halt_kind = None
+        self._halt_detail = ""
+        self._resume_phase = None
+        self._halt_deadline = None
+        self._halt_action_elapsed = None
+        self._odom_wall = None
+        self._odom_stamp = None
+        self._map_fingerprint = None
+        self._localization = None
+        self._localization_wall = 0.0
+        self._costmap = None
+        self._costmap_wall = 0.0
+        self._footprint = []
+        self._footprint_wall = 0.0
+        self._footprint_stamp = None
+        self._aligned = False
+        self._action_started = None
+        self._spin_progress = 0.0
+        self._spin_last_yaw = None
+        retained = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(LocalizationState, "/lio/localization_state", self._on_localization, 10)
+        self.create_subscription(OccupancyGrid, "/global_costmap/costmap", self._on_costmap, retained)
+        self.create_subscription(OccupancyGrid, "/map", self._on_map, retained)
+        self.create_subscription(PolygonStamped, "/global_costmap/published_footprint", self._on_footprint, 10)
+        self.add_on_set_parameters_callback(self._configure_web_task)
         self._cancel_requested = False
         self._compute_goal_handle = None
         self._follow_goal_handle = None
@@ -255,10 +323,17 @@ class RoutePatrol(Node):
         self._stop_deadline = None
         self._stopped_since = None
         self._last_task_feedback_log_time = 0.0
-        self._flow_timer = self.create_timer(0.1, self._poll_flow)
+        steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self._flow_timer = self.create_timer(0.1, self._poll_flow, clock=steady_clock)
+        self._status_timer = self.create_timer(0.2, self._publish_status, clock=steady_clock)
 
         self.create_service(Trigger, "/route_patrol/start", self._start_route)
         self.create_service(Trigger, "/route_patrol/cancel", self._cancel_route)
+        self.create_service(SetBool, "/route_patrol/preview_lock", self._preview_lock)
+        self.create_service(Trigger, "/route_patrol/start_web", self._start_web)
+        self.create_service(Trigger, "/route_patrol/pause", self._pause_web)
+        self.create_service(Trigger, "/route_patrol/resume", self._resume_web)
+        self.create_service(Trigger, "/route_patrol/finish_web", self._finish_web)
         self.get_logger().info(
             f"Ready. Waiting for /route_patrol/start; route "
             f"{self._start_id} -> {self._goal_id}."
@@ -323,6 +398,11 @@ class RoutePatrol(Node):
             return response
 
         self._state = "computing"
+        self._run_id = str(uuid.uuid4())
+        self._last_web_task_id = None
+        self._events = []
+        self._last_outcome = None
+        self._last_summary = {}
         self._cancel_requested = False
         self._compute_goal_handle = None
         self._follow_goal_handle = None
@@ -345,6 +425,210 @@ class RoutePatrol(Node):
         self.get_logger().info(response.message)
         return response
 
+    def _preview_lock(self, request, response):
+        if request.data:
+            if self._state != "idle":
+                response.success = False
+                response.message = "巡检执行器忙，不能预览新路线。"
+                return response
+            self._state = "previewing"
+        elif self._state == "previewing":
+            self._state = "idle"
+        else:
+            response.success = False
+            response.message = "没有持有路线预览锁。"
+            return response
+        response.success = True
+        return response
+
+    def _configure_web_task(self, parameters):
+        try:
+            candidate = None
+            for parameter in parameters:
+                if parameter.name == "web_mission":
+                    if self._state != "previewing":
+                        raise ValueError("必须先锁定空闲巡检执行器")
+                    candidate = parse_mission(parameter.value)
+                elif parameter.name in {"web_freshness_sec", "costmap_freshness_sec", "resume_tolerance"}:
+                    value = parameter.value
+                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not .1 <= value <= 10:
+                        raise ValueError(f"{parameter.name} 必须在 0.1～10 之间")
+            if candidate is not None:
+                self._pending_web_task = candidate
+            return SetParametersResult(successful=True)
+        except (ValueError, TypeError, KeyError) as error:
+            return SetParametersResult(successful=False, reason=str(error))
+
+    def _event(self, kind, detail):
+        if self._web_task:
+            self._event_seq += 1
+            event = {"seq": self._event_seq, "kind": kind, "detail": detail,
+                     "ros_time": self._now_seconds(), "time": datetime.now(timezone.utc).isoformat()}
+            self._events.append(event)
+            self._events = self._events[-2048:]
+            if self._journal and not self._journal_failed:
+                status = (self._last_outcome if self._last_outcome else
+                          "paused" if self._state == "paused" else "pausing" if self._state == "pausing" else
+                          "cancelling" if self._halt_kind else "running")
+                try:
+                    self._journal.update(self._web_task["task_id"], {
+                        "status": status, "state": self._state, "event_seq": self._event_seq,
+                        "completed_points": self._completed_points, "active_goals": self._owned_goals(),
+                        "executor_instance": self._executor_instance, "detail": self._halt_detail}, [event])
+                except (OSError, sqlite3.Error) as error:
+                    self._journal_failed = True
+                    self.get_logger().error(f"任务记录无法写入：{error}")
+                    self._request_halt("failed", "任务记录无法写入，停止执行")
+            self._publish_status()
+
+    def _owned_goals(self):
+        goals = [self._pending_goal] if self._pending_goal else []
+        for name, handle in (("compute_route", self._compute_goal_handle),
+                             ("follow_path", self._follow_goal_handle),
+                             (getattr(self, "_mission_action_name", ""), self._mission_goal_handle)):
+            if handle is not None:
+                goals.append({"action": name, "uuid": [int(value) for value in handle.goal_id.uuid], "pending": False})
+        return goals
+
+    def _send_goal(self, client, goal, name, feedback_callback=None):
+        identifier = UUID(uuid=list(uuid.uuid4().bytes))
+        self._pending_goal = {"action": name, "uuid": [int(value) for value in identifier.uuid], "pending": True}
+        self._event("goal_submitted", f"提交 {name} 请求")
+        if self._web_task and self._journal_failed:
+            self._pending_goal = None
+            raise RuntimeError("任务记录写入失败，未提交运动请求")
+        try:
+            return client.send_goal_async(goal, feedback_callback=feedback_callback, goal_uuid=identifier)
+        except Exception:
+            self._pending_goal = None
+            raise
+
+    def _on_map(self, message):
+        self._map_fingerprint = occupancy_fingerprint(message)
+
+    def _on_localization(self, message):
+        self._localization = message
+        self._localization_wall = time.monotonic()
+
+    def _on_costmap(self, message):
+        self._costmap = message
+        self._costmap_wall = time.monotonic()
+
+    def _on_footprint(self, message):
+        try:
+            if message.header.frame_id == self._base_frame:
+                points = [(point.x, point.y) for point in message.polygon.points]
+            else:
+                transform = self._tf_buffer.lookup_transform(
+                    message.header.frame_id, self._base_frame, Time.from_msg(message.header.stamp)).transform
+                yaw = yaw_of(transform.rotation)
+                c, s = math.cos(yaw), math.sin(yaw)
+                points = [(c * (point.x - transform.translation.x) + s * (point.y - transform.translation.y),
+                           -s * (point.x - transform.translation.x) + c * (point.y - transform.translation.y))
+                          for point in message.polygon.points]
+            if len(points) < 3 or any(not math.isfinite(v) for point in points for v in point):
+                return
+            self._footprint = points
+            self._footprint_wall = time.monotonic()
+            self._footprint_stamp = Time.from_msg(message.header.stamp).nanoseconds / 1e9
+        except TransformException:
+            return
+
+    def _web_ready(self):
+        freshness = float(self.get_parameter("web_freshness_sec").value)
+        mission = self._web_task or self._pending_web_task
+        if mission and self._map_fingerprint != mission["fingerprint"]:
+            raise ValueError("机器人地图发生变化或尚未收到地图")
+        message = self._localization
+        if (message is None or not message.valid or time.monotonic() - self._localization_wall > freshness
+                or not 0 <= self._now_seconds() - Time.from_msg(message.header.stamp).nanoseconds / 1e9 <= freshness):
+            raise ValueError("定位无效或量测数据过期")
+        transform = self._tf_buffer.lookup_transform("map", self._base_frame, Time())
+        if not all(math.isfinite(value) for value in (
+                transform.transform.translation.x, transform.transform.translation.y,
+                yaw_of(transform.transform.rotation))):
+            raise ValueError("机器人 TF 坐标无效")
+        if not 0 <= self._now_seconds() - Time.from_msg(transform.header.stamp).nanoseconds / 1e9 <= freshness:
+            raise ValueError("机器人 TF 已过期")
+        cost_age = float(self.get_parameter("costmap_freshness_sec").value)
+        if (self._costmap is None or time.monotonic() - self._costmap_wall > cost_age
+                or not 0 <= self._now_seconds() - Time.from_msg(self._costmap.header.stamp).nanoseconds / 1e9 <= cost_age):
+            raise ValueError("全局代价地图已过期")
+        if (not self._footprint or time.monotonic() - self._footprint_wall > cost_age
+                or not 0 <= self._now_seconds() - self._footprint_stamp <= cost_age):
+            raise ValueError("机器人轮廓已过期")
+        return transform.transform
+
+    def _start_web(self, _request, response):
+        if self._state != "previewing" or self._pending_web_task is None:
+            response.message = "Web 任务尚未配置或执行器未锁定"
+            return response
+        try:
+            self._web_ready()
+            directory = FilePath(self._pending_web_task["journal_dir"])
+            if not directory.is_absolute() or not (directory / "tasks.sqlite3").is_file():
+                raise ValueError("机器人任务记录目录未准备好")
+            journal = TaskJournal(directory)
+            recorded = journal.get(self._pending_web_task["task_id"], details=False)
+            if recorded["status"] != "dispatching" or recorded.get("restored"):
+                raise ValueError("任务已经接受、结束或中断，不能重复执行")
+            if recorded["fingerprint"] != self._pending_web_task["fingerprint"]:
+                raise ValueError("持久化任务快照与地图不一致")
+            if not all(client.server_is_ready() for client in (
+                    self._compute_client, self._follow_client, self._navigate_client,
+                    self._spin_client, self._wait_client)):
+                raise ValueError("导航、跟随或点位动作服务未就绪")
+        except (ValueError, TransformException, KeyError, OSError, sqlite3.Error) as error:
+            response.message = str(error)
+            return response
+        self._web_task = self._pending_web_task
+        self._journal = journal
+        self._journal_failed = False
+        self._pending_web_task = None
+        self._last_web_task_id = self._web_task["task_id"]
+        self._run_id = self._last_web_task_id
+        self._events = []
+        self._event_seq = 0
+        self._completed_points = 0
+        self._last_outcome = None
+        self._last_summary = {}
+        self._cancel_requested = False
+        self._halt_kind = None
+        self._halt_detail = ""
+        self._resume_phase = None
+        self._planning_ids = [station["node_id"] for station in self._web_task["stations"]]
+        self._point_tasks = {}
+        for station in self._web_task["stations"]:
+            self._point_tasks[station["node_id"]] = [
+                PointTask("wait", action["duration_sec"] + 10, duration_sec=action["duration_sec"])
+                if action["type"] == "wait" else
+                PointTask("spin", action["timeout_sec"], angle_rad=math.radians(action["angle_deg"]))
+                for action in station["actions"]]
+        self._planning_index = 0
+        self._segments = []
+        self._route_node_ids = []
+        self._segment_index = 0
+        self._planned_path_points = 0
+        self._state = "computing"
+        self._publish_patrol_path()
+        self._event("accepted", "机器人已接受任务，开始规划")
+        self._submit_compute_leg()
+        response.success = True
+        response.message = self._run_id
+        return response
+
+    def _finish_web(self, _request, response):
+        if self._state != "finished":
+            response.message = "任务尚未完成停车确认"
+            return response
+        self._web_task = None
+        self._journal = None
+        self._pending_web_task = None
+        self._state = "idle"
+        self._publish_status()
+        response.success = True
+        return response
+
     def _submit_compute_leg(self):
         if self._cancel_requested:
             self._finish_cancelled()
@@ -361,14 +645,18 @@ class RoutePatrol(Node):
             f"节点 {goal.start_id} -> {goal.goal_id}。"
         )
         try:
-            future = self._compute_client.send_goal_async(goal)
+            self._send_pending = True
+            future = self._send_goal(self._compute_client, goal, "compute_route")
         except Exception as exc:
+            self._send_pending = False
             self._finish_with_error(f"提交路线规划请求失败：{exc}")
             return False
         future.add_done_callback(self._on_compute_goal_response)
         return True
 
     def _on_compute_goal_response(self, future):
+        self._send_pending = False
+        self._pending_goal = None
         try:
             goal_handle = future.result()
         except Exception as exc:  # ROS futures may report transport errors here.
@@ -380,7 +668,8 @@ class RoutePatrol(Node):
             return
 
         self._compute_goal_handle = goal_handle
-        if self._cancel_requested:
+        self._event("goal_accepted", "路线规划请求已接受")
+        if self._cancel_requested or self._halt_kind:
             goal_handle.cancel_goal_async()
 
         result_future = goal_handle.get_result_async()
@@ -394,6 +683,8 @@ class RoutePatrol(Node):
             return
 
         self._compute_goal_handle = None
+        if self._web_task and self._halt_kind:
+            return
         if self._cancel_requested or wrapped_result.status == GoalStatus.STATUS_CANCELED:
             self._finish_cancelled()
             return
@@ -430,6 +721,13 @@ class RoutePatrol(Node):
             self._finish_with_error(f"路线分段失败：{exc}")
             return
         node_ids = [node.nodeid for node in result.route.nodes]
+        if self._web_task:
+            merged = Path()
+            merged.header = deepcopy(path.header)
+            for segment in segments:
+                merged.poses.extend(deepcopy(segment.poses[1:] if merged.poses else segment.poses))
+            segments = [merged]
+            node_ids = [node_ids[0], node_ids[-1]]
         if (
             node_ids[0] != self._planning_ids[self._planning_index]
             or node_ids[-1] != self._planning_ids[self._planning_index + 1]
@@ -454,6 +752,15 @@ class RoutePatrol(Node):
             return
 
         self._segment_index = 0
+        if self._web_task:
+            try:
+                self._web_ready()
+                validate_footprints(self._segments, self._web_task["stations"], self._costmap, self._footprint)
+                self._web_ready()
+            except (ValueError, TransformException) as error:
+                self._finish_with_error(f"路线轮廓校验失败：{error}")
+                return
+            self._event("planned", "全部路段已规划并通过机器人轮廓校验")
         self._publish_patrol_path()
         self.get_logger().info(
             f"路线已规划：{self._planned_path_points} 个路径点，frame={path.header.frame_id}；"
@@ -480,6 +787,31 @@ class RoutePatrol(Node):
         for pose in path.poses:
             pose.header = deepcopy(path.header)
         self._path_publisher.publish(path)
+
+    def _publish_status(self):
+        goals = self._owned_goals()
+        document = {
+            "run_id": self._run_id, "state": self._state,
+            "cancel_requested": self._cancel_requested,
+            "segment_index": self._segment_index,
+            "total_segments": len(self._segments),
+            "station_node_id": self._station_node_id,
+            "station_name": next((station["name"] for station in self._web_task["stations"]
+                                  if station["node_id"] == self._station_node_id), None) if self._web_task else None,
+            "action_index": self._task_index,
+            "action": self._active_task.kind if self._active_task else None,
+            "outcome": self._last_outcome,
+            "last_summary": self._last_summary,
+            "executor_instance": self._executor_instance,
+            "task_id": self._last_web_task_id,
+            "completed_points": self._completed_points,
+            "total_points": len(self._web_task["stations"]) if self._web_task else self._last_summary.get("total_points", 0),
+            "events": self._events,
+            "event_seq": self._event_seq,
+            "active_goals": goals,
+            "halt_detail": self._halt_detail,
+        }
+        self._status_publisher.publish(String(data=json.dumps(document, allow_nan=False)))
 
     def _now_seconds(self):
         return self.get_clock().now().nanoseconds / 1e9
@@ -522,18 +854,36 @@ class RoutePatrol(Node):
         if math.isfinite(speed) and math.isfinite(angular):
             self._odom_speed = (speed, angular)
             self._odom_received_at = self._now_seconds()
+            self._odom_wall = time.monotonic()
+            self._odom_stamp = Time.from_msg(message.header.stamp).nanoseconds / 1e9
 
     def _begin_station(self, node_id, after_station):
         self._station_node_id = node_id
         self._station_tasks = self._point_tasks.get(node_id, [])
         self._task_index = 0
+        self._aligned = False
         self._after_station = after_station
         self._state = "stopping"
         self._stop_deadline = self._now_seconds() + self._stop_timeout
         self._stopped_since = None
         self.get_logger().info(f"节点 {node_id}：等待车辆停稳。")
+        self._event("station", f"到达节点 {node_id}，等待停车")
 
     def _poll_flow(self):
+        if self._web_task and self._state not in {"idle", "finished", "paused"}:
+            try:
+                transform = self._web_ready()
+                if self._active_task and self._active_task.kind == "spin" and self._spin_last_yaw is not None:
+                    yaw = yaw_of(transform.rotation)
+                    self._spin_progress += math.atan2(math.sin(yaw - self._spin_last_yaw),
+                                                     math.cos(yaw - self._spin_last_yaw))
+                    self._spin_last_yaw = yaw
+            except (ValueError, TransformException) as error:
+                if self._halt_kind != "failed":
+                    self._request_halt("failed", str(error))
+        if self._web_task and self._halt_kind:
+            self._poll_halt()
+            return
         now = self._now_seconds()
         if self._state == "stopping":
             if self._cancel_requested:
@@ -544,6 +894,8 @@ class RoutePatrol(Node):
                 and 0 <= now - self._odom_received_at <= 1.0
                 and self._odom_speed[0] <= 0.02
                 and self._odom_speed[1] <= 0.02
+                and (not self._web_task or (time.monotonic() - self._odom_wall <= 1
+                     and 0 <= now - self._odom_stamp <= 1))
             )
             if stopped:
                 if self._stopped_since is None:
@@ -580,7 +932,28 @@ class RoutePatrol(Node):
         if self._cancel_requested:
             self._finish_cancelled()
             return
+        if self._web_task and not self._aligned:
+            station = next(item for item in self._web_task["stations"] if item["node_id"] == self._station_node_id)
+            try:
+                transform = self._web_ready()
+                delta = math.radians(station["heading"]) - yaw_of(transform.rotation)
+                delta = math.atan2(math.sin(delta), math.cos(delta))
+            except (ValueError, TransformException) as error:
+                self._finish_with_error(str(error))
+                return
+            if abs(delta) > .05:
+                goal = Spin.Goal()
+                goal.target_yaw = delta
+                self._set_duration(goal.time_allowance, 30)
+                self._send_mission_action(self._spin_client, goal, "aligning", self._on_heading_succeeded,
+                                          timeout_sec=30)
+                self._event("aligning", f"节点 {self._station_node_id} 调整到点朝向")
+                return
+            self._aligned = True
         if self._task_index >= len(self._station_tasks):
+            if self._web_task:
+                self._completed_points += 1
+                self._event("station_completed", f"节点 {self._station_node_id} 的全部动作已完成")
             after_station = self._after_station
             self._after_station = None
             self._active_task = None
@@ -589,6 +962,17 @@ class RoutePatrol(Node):
 
         task = self._station_tasks[self._task_index]
         self._active_task = task
+        if self._web_task:
+            self._action_started = self._now_seconds()
+            self._spin_progress = 0.0
+            try:
+                self._spin_last_yaw = yaw_of(self._web_ready().rotation) if task.kind == "spin" else None
+            except (ValueError, TransformException) as error:
+                self._finish_with_error(str(error))
+                return
+            if (task.kind == "wait" and task.duration_sec <= .001) or (task.kind == "spin" and abs(task.angle_rad) <= .001):
+                self._on_task_succeeded()
+                return
         self._last_task_feedback_log_time = 0.0
         if task.kind == "spin":
             goal = Spin.Goal()
@@ -613,6 +997,13 @@ class RoutePatrol(Node):
             timeout_sec=task.timeout_sec,
             feedback_callback=self._on_task_feedback,
         )
+        self._event("action", f"节点 {self._station_node_id} 开始第 {self._task_index + 1} 项：{description}")
+
+    def _on_heading_succeeded(self):
+        self._aligned = True
+        self._state = "stopping"
+        self._stop_deadline = self._now_seconds() + self._stop_timeout
+        self._stopped_since = None
 
     def _send_mission_action(
         self, client, goal, state, on_success, *, timeout_sec=None, feedback_callback=None
@@ -631,12 +1022,15 @@ class RoutePatrol(Node):
             )
             return
         self._state = state
+        self._mission_action_name = "navigate_to_pose" if state == "entering" else "spin" if client is self._spin_client else "wait"
         self._mission_deadline = (
             self._now_seconds() + timeout_sec if timeout_sec is not None else None
         )
         try:
-            future = client.send_goal_async(goal, feedback_callback=feedback_callback)
+            self._send_pending = True
+            future = self._send_goal(client, goal, self._mission_action_name, feedback_callback)
         except Exception as exc:
+            self._send_pending = False
             self._finish_with_error(f"提交{self._mission_label}请求失败：{exc}")
             return
         future.add_done_callback(
@@ -644,6 +1038,8 @@ class RoutePatrol(Node):
         )
 
     def _on_mission_goal_response(self, future, on_success):
+        self._send_pending = False
+        self._pending_goal = None
         try:
             handle = future.result()
         except Exception as exc:
@@ -658,7 +1054,8 @@ class RoutePatrol(Node):
                 )
             return
         self._mission_goal_handle = handle
-        if self._cancel_requested or self._abort_reason:
+        self._event("goal_accepted", f"{self._mission_action_name} 已接受")
+        if self._cancel_requested or self._abort_reason or self._halt_kind:
             handle.cancel_goal_async()
         result_future = handle.get_result_async()
         result_future.add_done_callback(
@@ -673,6 +1070,20 @@ class RoutePatrol(Node):
             return
         self._mission_goal_handle = None
         self._mission_deadline = None
+        if self._web_task and self._halt_kind:
+            if wrapped.status not in {GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_CANCELED}:
+                self._request_halt("failed", "暂停或取消期间 Nav2 点位动作失败")
+            if self._active_task and self._active_task.kind == "wait" and self._action_started is not None:
+                self._halt_action_elapsed = self._now_seconds() - self._action_started
+            if wrapped.status == GoalStatus.STATUS_SUCCEEDED and wrapped.result.error_code == 0:
+                if self._resume_phase == "task":
+                    self._task_index += 1
+                    self._active_task = None
+                    self._resume_phase = "stopping"
+                elif self._resume_phase == "aligning":
+                    self._aligned = True
+                    self._resume_phase = "stopping"
+            return
         if self._abort_reason:
             self._finish_with_error(self._abort_reason)
             return
@@ -707,6 +1118,8 @@ class RoutePatrol(Node):
             f"节点 {self._station_node_id}：任务 {self._task_index + 1} 执行完成。"
         )
         self._task_index += 1
+        self._active_task = None
+        self._event("action_completed", f"节点 {self._station_node_id} 第 {self._task_index} 项动作完成")
         # Wait for the spin command to settle before another task or path goal.
         self._state = "stopping"
         self._stop_deadline = self._now_seconds() + self._stop_timeout
@@ -716,9 +1129,18 @@ class RoutePatrol(Node):
         if self._cancel_requested:
             self._finish_cancelled()
             return
+        if self._web_task:
+            try:
+                self._web_ready()
+                validate_footprints([self._segments[self._segment_index]], [], self._costmap, self._footprint)
+                self._web_ready()
+            except (ValueError, TransformException) as error:
+                self._finish_with_error(str(error))
+                return
 
         goal = FollowPath.Goal()
         goal.path = self._segments[self._segment_index]
+        self._active_path_publisher.publish(goal.path)
         goal.controller_id = self._controller_id
         goal.goal_checker_id = self._goal_checker_id
         goal.progress_checker_id = self._progress_checker_id
@@ -731,10 +1153,15 @@ class RoutePatrol(Node):
             f"开始第 {self._segment_index + 1}/{len(self._segments)} 段："
             f"节点 {start_id} -> {end_id}；先对齐本段方向，再前进。"
         )
-        follow_future = self._follow_client.send_goal_async(
-            goal, feedback_callback=self._on_follow_feedback
-        )
+        try:
+            self._send_pending = True
+            follow_future = self._send_goal(self._follow_client, goal, "follow_path", self._on_follow_feedback)
+        except Exception as error:
+            self._send_pending = False
+            self._finish_with_error(str(error))
+            return
         follow_future.add_done_callback(self._on_follow_goal_response)
+        self._event("following", f"前往节点 {end_id}")
 
     def _on_follow_feedback(self, feedback_message):
         now = time.monotonic()
@@ -750,6 +1177,8 @@ class RoutePatrol(Node):
         self._last_feedback_log_time = now
 
     def _on_follow_goal_response(self, future):
+        self._send_pending = False
+        self._pending_goal = None
         try:
             goal_handle = future.result()
         except Exception as exc:
@@ -761,7 +1190,8 @@ class RoutePatrol(Node):
             return
 
         self._follow_goal_handle = goal_handle
-        if self._cancel_requested:
+        self._event("goal_accepted", "路径跟随请求已接受")
+        if self._cancel_requested or self._halt_kind:
             goal_handle.cancel_goal_async()
 
         result_future = goal_handle.get_result_async()
@@ -775,6 +1205,10 @@ class RoutePatrol(Node):
             return
 
         self._follow_goal_handle = None
+        if self._web_task and self._halt_kind:
+            if wrapped_result.status == GoalStatus.STATUS_SUCCEEDED and wrapped_result.result.error_code == 0:
+                self._resume_phase = "following"
+            return
         if self._cancel_requested or wrapped_result.status == GoalStatus.STATUS_CANCELED:
             self._finish_cancelled()
             return
@@ -816,12 +1250,21 @@ class RoutePatrol(Node):
             self._send_segment()
             return
 
-        self._reset_mission()
+        self._reset_mission("completed")
         self.get_logger().info(
             f"路线执行完成：节点 {self._start_id} -> {self._goal_id}。"
         )
 
     def _cancel_route(self, _request, response):
+        if self._web_task and self._state != "finished":
+            self._request_halt("cancelled", "用户请求取消任务")
+            response.success = True
+            response.message = "正在取消当前动作并确认停车"
+            return response
+        if self._state == "previewing":
+            response.success = False
+            response.message = "正在预览路线，等待网关恢复原路线图后再操作。"
+            return response
         if self._state == "idle":
             response.success = False
             response.message = "当前没有运行中的路线任务。"
@@ -842,8 +1285,138 @@ class RoutePatrol(Node):
         self.get_logger().info(response.message)
         return response
 
-    def _reset_mission(self):
-        self._state = "idle"
+    def _pause_web(self, _request, response):
+        if not self._web_task or self._state in {"finished", "idle"}:
+            response.message = "没有可暂停的 Web 任务"
+            return response
+        if self._state == "paused" or self._halt_kind == "paused":
+            response.success = True
+            return response
+        if self._halt_kind:
+            response.message = "正在停止，不能暂停"
+            return response
+        self._request_halt("paused", "用户请求暂停")
+        response.success = True
+        response.message = "已请求暂停，正在确认停车"
+        return response
+
+    def _request_halt(self, kind, detail):
+        if self._state == "finished":
+            return
+        if self._halt_kind == "failed" and kind != "failed":
+            return
+        if self._halt_kind is None:
+            self._resume_phase = self._state
+            self._halt_action_elapsed = None
+            self._halt_deadline = time.monotonic() + self._stop_timeout
+            self._stopped_since = None
+        self._halt_kind = kind
+        self._halt_detail = detail
+        self._mission_deadline = None
+        self._state = "pausing" if kind == "paused" else "cancelling"
+        for handle in (self._mission_goal_handle, self._follow_goal_handle, self._compute_goal_handle):
+            if handle is not None:
+                handle.cancel_goal_async()
+        self._event("halt_requested", detail)
+
+    def _poll_halt(self):
+        now = time.monotonic()
+        active = self._send_pending or any(handle is not None for handle in (
+            self._compute_goal_handle, self._follow_goal_handle, self._mission_goal_handle))
+        stopped = (not active and self._odom_wall is not None and now - self._odom_wall <= 1
+                   and 0 <= self._now_seconds() - self._odom_stamp <= 1
+                   and self._odom_speed[0] <= .02 and self._odom_speed[1] <= .02)
+        if stopped:
+            if self._stopped_since is None:
+                self._stopped_since = now
+            if now - self._stopped_since >= self._stop_settle_time:
+                kind = self._halt_kind
+                self._halt_kind = None
+                if kind == "paused":
+                    if self._resume_phase == "task" and self._active_task is not None:
+                        task = self._active_task
+                        if task.kind == "wait":
+                            elapsed = self._halt_action_elapsed
+                            if elapsed is None:
+                                elapsed = self._now_seconds() - self._action_started
+                            remaining = max(0, task.duration_sec - elapsed)
+                            self._station_tasks[self._task_index] = replace(task, duration_sec=remaining)
+                        else:
+                            direction = 1 if task.angle_rad >= 0 else -1
+                            remaining = max(0, abs(task.angle_rad) - max(0, direction * self._spin_progress))
+                            self._station_tasks[self._task_index] = replace(task, angle_rad=direction * remaining)
+                    self._state = "paused"
+                    self._event("paused", "已确认停车，任务暂停")
+                else:
+                    self._reset_mission(kind, self._halt_detail)
+                return
+        else:
+            self._stopped_since = None
+        if now > self._halt_deadline and self._state != "stop_unconfirmed":
+            self._state = "stop_unconfirmed"
+            self._halt_detail += "；停车未确认，保持执行器锁定"
+            self._event("stop_unconfirmed", self._halt_detail)
+
+    def _resume_web(self, _request, response):
+        if not self._web_task or self._state != "paused":
+            response.message = "任务尚未确认暂停"
+            return response
+        try:
+            transform = self._web_ready()
+            if self._segments:
+                validate_footprints(self._segments[self._segment_index:], [], self._costmap, self._footprint)
+            phase = self._resume_phase
+            if phase == "following":
+                path = self._segments[self._segment_index]
+                closest = min(range(len(path.poses)), key=lambda index: math.hypot(
+                    path.poses[index].pose.position.x - transform.translation.x,
+                    path.poses[index].pose.position.y - transform.translation.y))
+                position = path.poses[closest].pose.position
+                if math.hypot(position.x - transform.translation.x, position.y - transform.translation.y) > float(self.get_parameter("resume_tolerance").value):
+                    raise ValueError("车辆已偏离待执行路段，请重新制定任务")
+                tail = deepcopy(path)
+                tail.poses = tail.poses[max(0, min(closest, len(path.poses) - 2)):]
+                self._segments[self._segment_index] = tail
+        except (ValueError, TransformException) as error:
+            response.message = str(error)
+            return response
+        self._halt_detail = ""
+        self._event("resumed", "继续执行未完成步骤")
+        if phase == "computing":
+            self._state = "computing"
+            self._segments = []
+            self._route_node_ids = []
+            self._planning_index = 0
+            self._planned_path_points = 0
+            self._submit_compute_leg()
+        elif phase == "entering":
+            self._enter_route()
+        elif phase == "following":
+            target = self._segments[self._segment_index].poses[-1].pose.position
+            if math.hypot(target.x - transform.translation.x, target.y - transform.translation.y) <= self._start_tolerance:
+                self._begin_station(self._route_node_ids[self._segment_index + 1], self._advance_segment)
+            else:
+                self._send_segment()
+        else:
+            self._state = "stopping"
+            self._stop_deadline = self._now_seconds() + self._stop_timeout
+            self._stopped_since = None
+        response.success = True
+        response.message = "已恢复未完成步骤"
+        return response
+
+    def _reset_mission(self, outcome=None, detail=""):
+        self._last_outcome = outcome
+        self._last_summary = {"total_segments": len(self._segments),
+                              "completed_segments": self._segment_index, "detail": detail}
+        self._last_summary.update(total_points=len(self._web_task["stations"]) if self._web_task else 0,
+                                  completed_points=self._completed_points)
+        empty_path = Path()
+        empty_path.header.frame_id = "map"
+        empty_path.header.stamp = self.get_clock().now().to_msg()
+        self._active_path_publisher.publish(empty_path)
+        self._state = "finished" if self._web_task else "idle"
+        self._halt_kind = None
         self._cancel_requested = False
         self._compute_goal_handle = None
         self._follow_goal_handle = None
@@ -862,13 +1435,20 @@ class RoutePatrol(Node):
         self._after_station = None
         self._stop_deadline = None
         self._stopped_since = None
+        self._event(outcome or "ended", detail or {"completed": "任务完成并已停车", "cancelled": "任务已取消并已停车"}.get(outcome, "任务结束"))
 
     def _finish_with_error(self, message):
-        self._reset_mission()
+        if self._web_task:
+            self._request_halt("failed", message)
+            return
+        self._reset_mission("failed", message)
         self.get_logger().error(message)
 
     def _finish_cancelled(self):
-        self._reset_mission()
+        if self._web_task:
+            self._request_halt("cancelled", "Nav2 动作已取消，等待停车确认")
+            return
+        self._reset_mission("cancelled")
         self.get_logger().info("路线任务已取消。")
 
 

@@ -20,4 +20,16 @@ install(
   RENAME route_patrol
 )
 
+install(
+  PROGRAMS scripts/web_gateway.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME web_gateway
+)
+
+install(
+  FILES scripts/web_mission.py scripts/task_journal.py scripts/task_manager.py
+    scripts/navigation_settings.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

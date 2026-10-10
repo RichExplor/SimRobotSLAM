@@ -253,6 +253,49 @@ ros2 launch sim_robot_slam outdoor_navigation.launch.py task_config:=""
 
 ## 7. 分开启动各模块
 
+### Web 定位、路线配置与任务接入
+
+WebVizeSLAM 新增独立网关；编译本包后，在已 source ROS 和工作区的终端运行：
+
+```bash
+ros2 run sim_robot_slam web_gateway --ros-args \
+  -p use_sim_time:=true -p map_id:="<Web 地图 UUID>" -p version_id:="<版本 UUID>" \
+  -p task_data_dir:="$HOME/.local/share/super_slam/web_tasks"
+```
+
+网关只监听 `127.0.0.1:8765`，提供定位、TF、地图摘要、巡检状态和不触发运动的
+路线规划预览。网页服务设置 `ROBOT_GATEWAY_URL=http://127.0.0.1:8765`。
+Nav2 必须加载与 Web 归档完全一致的 PGM/YAML；仅填 UUID 不会绕过栅格校验。
+网关使用 `/route_server/set_route_graph` 服务连接 Route Server。状态 JSON 的
+`preview_missing` / `preview_reason` 和 `task_missing` / `task_reason` 分别说明
+规划与任务接口缺失原因；栅格预检通过仍需这些接口就绪才可下发。
+完整配置和阶段范围见 [Web 接入说明](../WebVizeSLAM/system_web/README.md#ros-2-接入与实施进度)。
+
+巡检节点新增 `/route_patrol/status`（JSON 字符串）、`/route_patrol/active_path`
+和 `/route_patrol/preview_lock`（SetBool）。预览持有锁时不能开始或取消巡检；
+网关恢复原 `graph_filepath` 后释放锁。恢复失败时保持锁定，需要重启导航和巡检。
+网页已接通任务下发、到点朝向与顺序等待/旋转、暂停/继续/取消、持久化任务历史。
+`task_data_dir` 默认空，仅遥测/预览；指定持久目录才启用任务控制，网关与执行器共用账本。
+新增 `/route_patrol/start_web`、`pause`、`resume`、`finish_web` 为 Trigger，动态
+`web_mission` 参数仅在空闲执行器被预览锁保留时配置，由网关维护图加载/恢复顺序。
+传统 `/route_patrol/start` 与 YAML 点位任务入口保持兼容。
+
+Web 任务先校验新鲜定位/TF、实际地图摘要、全局代价地图和机器人轮廓，再运动。
+暂停恢复只执行剩余等待、剩余旋转或剩余路径；轮速确认停稳前不宣告暂停/取消。
+定位、地图或代价地图过期会取消动作；超过停车超时保持锁定，恢复原路线图后才空闲。
+执行器心跳丢失或节点重启后不重放动作，网关按账本所属 Goal UUID 取消原动作并确认停车；执行器状态恢复后再恢复原图。
+状态与安全检查使用单调时钟，点位时长和量测年龄使用 ROS 时间；暂停仿真后持续
+断流会触发 Web 任务停止。`web_freshness_sec` 默认 1 秒、`costmap_freshness_sec`
+默认 3 秒、`resume_tolerance` 默认 0.5 m。
+
+网关还接入雷达、IMU、轮速、电池和机器人描述；传感器话题可用 `lidar_topic`、
+`imu_topic`、`odom_topic`、`battery_topic` 覆盖。`robot_id`、`robot_model`、`robot_serial`
+默认空，仅用于实际设备信息，不生成虚构编号。
+`/navigation-settings` 的 GET/POST 接入当前激活的 Nav2 控制器和平滑器速度参数；
+空闲且确认停稳后锁定执行器、下发、回读，失败时恢复原值；重启导航后恢复 YAML。
+当前导航模型不允许横向移动，横向速度为 0。具体字段和手动验收命令见上述 Web 接入说明。
+新增测试文件已按用户要求删除；仍需 Gazebo/RViz 与电脑浏览器实际运动联调验收。
+
 用于单独启停仿真、SuperSLAM 和 Nav2。每个终端先完成第 1 节的公共准备，再设置本工程安装目录：
 
 ```bash
