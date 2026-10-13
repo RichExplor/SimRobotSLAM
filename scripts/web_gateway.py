@@ -277,9 +277,20 @@ class WebGateway(Node):
             stamp = Time.from_msg(message.header.stamp)
             age = (self.get_clock().now() - stamp).nanoseconds / 1e9
             fresh = 0 <= age <= self._freshness
+        score = float(message.score) if message and math.isfinite(message.score) else None
+        score_stamp = message.score_stamp if message else None
+        score_time = Time.from_msg(score_stamp).nanoseconds / 1e9 if score_stamp else None
+        score_age = (self.get_clock().now().nanoseconds / 1e9 - score_time
+                     if score_time is not None and score_time > 0 else None)
+        score_fresh = bool(fresh and score is not None and 0 <= score <= 1
+                           and score_age is not None and 0 <= score_age <= self._freshness)
         localization = {"fresh": fresh, "valid": bool(fresh and message.valid),
                         "state": message.state_name if message else "unknown",
-                        "score": float(message.score) if message and math.isfinite(message.score) else None}
+                        "score": score, "score_fresh": score_fresh, "score_age_sec": score_age,
+                        "score_stamp": {"sec": score_stamp.sec, "nanosec": score_stamp.nanosec}
+                        if score_stamp else None,
+                        "fitness": float(message.fitness)
+                        if message and math.isfinite(message.fitness) and message.fitness >= 0 else None}
         pose, reason = None, "定位无效或数据过期"
         if localization["valid"]:
             try:
